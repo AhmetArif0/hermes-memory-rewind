@@ -173,6 +173,13 @@ keep separate histories.
 
 ## Changes
 
+- **1.3.0**: **Fix:** changes made outside the agent's turns were credited to whatever
+  came next. With `memory.write_approval` on, a write approved with `/memory approve`
+  appeared as the agent's next memory call (for example `via memory: remove` on a
+  version that added an entry), and a skill the curator archived appeared as the next
+  session's work. Each turn now starts with a baseline, and the session-start baseline
+  names no session, so these changes land in a `turn start` or `session start` version
+  that names no call or session.
 - **1.2.0**: `/memory-history` shows the history from any chat surface (gateway platforms,
   Desktop, TUI, CLI chat): recent versions, the versions of one file or skill, and what a
   version changed. It is read-only and follows the profile of the chat it runs in.
