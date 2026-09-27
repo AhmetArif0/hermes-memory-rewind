@@ -121,8 +121,8 @@ class SessionPlatforms:
     """Which platform recent sessions run on.
 
     post_tool_call carries no platform, so it is learned from on_session_start (first turn
-    of a new session) and on_session_end (every turn). A session resumed in a fresh process
-    is unknown until its first turn ends; unknown stays unknown, it is never guessed.
+    of a new session), pre_llm_call (every turn start) and on_session_end (every turn end).
+    Unknown stays unknown; it is never guessed.
     """
 
     def __init__(self, capacity: int = 256) -> None:

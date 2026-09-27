@@ -12,6 +12,7 @@ tags: [memory, skills, backup, history]
 requires_hermes: ">=0.21.5"
 provides_hooks:
   - on_session_start
+  - pre_llm_call
   - post_tool_call
   - on_session_end
 config_schema:

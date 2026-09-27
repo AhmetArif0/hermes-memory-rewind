@@ -83,11 +83,14 @@ takes effect in the next session (`/new`).
 | | Hermes lock files (`skills/.locks/`, `skills/.usage.json.lock`) |
 | | symlinks, embedded git repositories, caches, files larger than `max_file_kb` |
 
-A version is recorded when a session starts (a baseline before anything can change),
-after each `memory` or `skill_manage` call (and file edits that target these paths),
-and at the end of each turn to catch changes made outside tools (curator runs, hub
-installs, terminal edits). Unchanged state records nothing. Each version notes the
-tool calls and sessions behind it; the file list shows what actually changed.
+A version is recorded when a session starts and when each turn starts (baselines
+before anything can change), after each `memory` or `skill_manage` call (and file edits
+that target these paths), and at the end of each turn to catch changes the turn made
+outside tools (terminal edits). Unchanged state records nothing. Each version notes the
+tool calls and sessions behind it; the file list shows what actually changed. Changes
+made between turns, such as a staged write approved with `/memory approve`, a curator
+run or an edit in the Desktop app, land in the next `session start` or `turn start`
+version, which names no call or session.
 
 History is a bare git repository at
 `~/.hermes/plugin-data/memory-rewind/history.git` (per profile). It is isolated from
@@ -112,10 +115,12 @@ plugins:
 
 - **No network access**, no downloads, no self-update, and no Python dependencies
   (standard library only). The only external program is the local `git` binary.
-- **What it registers:** the hooks `on_session_start`, `post_tool_call` and
-  `on_session_end`, the `hermes memory-rewind` command, and one read-only slash
+- **What it registers:** the hooks `on_session_start`, `pre_llm_call`, `post_tool_call`
+  and `on_session_end`, the `hermes memory-rewind` command, and one read-only slash
   command, `/memory-history`. It gives the model no tools. `register()` only
-  registers; it does no I/O.
+  registers; it does no I/O. The `pre_llm_call` callback declares only the session id
+  and platform, so Hermes never passes it the user message or the conversation, and it
+  returns nothing, so nothing is added to the prompt.
 - **What it reads:** `memories/MEMORY.md`, `memories/USER.md`, `SOUL.md` and `skills/`
   (minus the exclusions above), plus its own settings. It never opens `.env`,
   `auth.json`, databases or `skills/.hub/`. From hook payloads it keeps only the tool
@@ -127,9 +132,9 @@ plugins:
 - **How git runs:** against its own bare repository, with your global and system git
   config, hooks, signing and pager ignored, literal pathspecs, a 60-second timeout,
   and background `gc` detaching disabled.
-- **When it runs:** a synchronous baseline when a session starts (about 35 ms once
-  history exists; the very first one records the whole skills tree and took 0.7 s on a
-  1,100-file tree), and background snapshots after
+- **When it runs:** a synchronous baseline when a session starts and when each turn
+  starts (about 40 ms once history exists; the very first one records the whole skills
+  tree and took 0.7 s on a 1,100-file tree), and background snapshots after
   `memory`/`skill_manage` calls and at the end of each turn. On exit, a queued
   snapshot gets up to 5 seconds to finish.
 
@@ -147,6 +152,9 @@ everyone in it, including what a version changed in memory. Run
   not covered.
 - Restore is a command you run on the host; the agent has no tool to rewrite history or
   restore, and `/memory-history` cannot restore.
+- Snapshots after a call and at turn end run in the background and usually land within a
+  fraction of a second. A change something else makes in that window, or while a turn is
+  running, is recorded with that call or turn.
 
 ## How it works
 

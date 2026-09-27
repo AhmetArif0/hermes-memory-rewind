@@ -20,6 +20,8 @@ _KNOWLEDGE_TOOLS = frozenset({"memory", "skill_manage"})
 # File tools only matter when they touch a tracked path; a false positive just costs a no-op snapshot.
 _FILE_TOOLS = frozenset({"write_file", "patch"})
 _TRACKED_MARKERS = ("MEMORY.md", "USER.md", "SOUL.md", "skills")
+# How long a baseline waits for queued snapshots; well under Hermes' 30 s hook timeout.
+_BASELINE_FLUSH_SECONDS = 5.0
 
 
 def resolve_home() -> Path:
@@ -66,19 +68,37 @@ def _touches_tracked_path(args) -> bool:
     return any(marker in text for marker in _TRACKED_MARKERS)
 
 
+def _record_baseline(ctx, reason: str) -> None:
+    """Record the current state now, naming no tool call and no session.
+
+    The turn or session about to start has changed nothing yet, so whatever changed since
+    the last version was done by something else (an approved staged write, a curator run,
+    a Desktop edit, another session) and is credited to no one. Queued snapshots land
+    first, so the calls they name keep their changes.
+    """
+    if not _enabled(ctx):
+        return
+    WORKER.flush(timeout=_BASELINE_FLUSH_SECONDS)
+    try:
+        take_snapshot(resolve_home(), resolve_data_dir(), read_options(ctx), [reason])
+    except GitUnavailable as exc:
+        WORKER._warn_once("git-missing", "memory-rewind: git is unavailable, history paused (%s)", exc)
+    except (GitError, OSError) as exc:
+        logger.warning("memory-rewind: %s snapshot failed: %s", reason, exc)
+
+
 def register(ctx) -> None:
     def on_session_start(session_id: str = "", platform: str = "", **_kwargs) -> None:
-        # Baseline before the session can change anything; ~35 ms once the history exists.
+        # Baseline before the session can change anything; ~40 ms once the history exists.
         SESSIONS.remember(session_id, platform)
-        if not _enabled(ctx):
-            return
-        try:
-            take_snapshot(resolve_home(), resolve_data_dir(), read_options(ctx),
-                          ["session start"], {session_id: platform or ""} if session_id else None)
-        except GitUnavailable as exc:
-            WORKER._warn_once("git-missing", "memory-rewind: git is unavailable, history paused (%s)", exc)
-        except (GitError, OSError) as exc:
-            logger.warning("memory-rewind: session-start snapshot failed: %s", exc)
+        _record_baseline(ctx, "session start")
+
+    def pre_llm_call(session_id: str = "", platform: str = "") -> None:
+        # Baseline at every turn start, so changes made between turns never land in a version
+        # that names this turn's calls or session. Only these two fields are declared, so
+        # Hermes never passes the user message or the conversation; returns nothing to inject.
+        SESSIONS.remember(session_id, platform)
+        _record_baseline(ctx, "turn start")
 
     def post_tool_call(tool_name: str = "", args=None, session_id: str = "", status: str = "",
                        **_kwargs) -> None:
@@ -95,13 +115,14 @@ def register(ctx) -> None:
                           call=describe_call(tool_name, args, status))
 
     def on_session_end(session_id: str = "", platform: str = "", **_kwargs) -> None:
-        # Catches writes that bypass tools: curator runs, hub installs, terminal edits.
+        # Catches writes made during the turn that bypass tools, such as terminal edits.
         SESSIONS.remember(session_id, platform)
         if _enabled(ctx):
             WORKER.submit(resolve_home(), resolve_data_dir(), read_options(ctx), "turn end", session_id,
                           platform=platform or "")
 
     ctx.register_hook("on_session_start", on_session_start)
+    ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_hook("post_tool_call", post_tool_call)
     ctx.register_hook("on_session_end", on_session_end)
 

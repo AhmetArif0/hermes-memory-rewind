@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -27,10 +28,10 @@ from conftest import PLUGIN_DIR  # noqa: E402
 PLUGIN_KEY = "memory-rewind"
 
 
-def _install(home: Path, settings: dict | None = None) -> None:
+def _install(home: Path, settings: dict | None = None, config: dict | None = None) -> None:
     shutil.copytree(PLUGIN_DIR, home / "plugins" / PLUGIN_KEY,
                     ignore=shutil.ignore_patterns("__pycache__"))
-    cfg = {"plugins": {"enabled": [PLUGIN_KEY]}}
+    cfg = {**(config or {}), "plugins": {"enabled": [PLUGIN_KEY]}}
     if settings is not None:
         cfg["plugins"]["entries"] = {PLUGIN_KEY: {"settings": settings}}
     (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8", newline="\n")
@@ -45,8 +46,8 @@ def hermes_env(home, tmp_path, monkeypatch):
     return home
 
 
-def _load(home: Path, settings: dict | None = None):
-    _install(home, settings)
+def _load(home: Path, settings: dict | None = None, config: dict | None = None):
+    _install(home, settings, config)
     manager = hermes_plugins.PluginManager()
     manager.discover_and_load()
     loaded = manager._plugins[PLUGIN_KEY]
@@ -63,7 +64,10 @@ def _history(home: Path):
 def test_loads_through_the_real_plugin_manager(hermes_env):
     manager, loaded = _load(hermes_env)
     assert loaded.enabled is True
-    assert set(loaded.hooks_registered) == {"on_session_start", "post_tool_call", "on_session_end"}
+    assert set(loaded.hooks_registered) == {"on_session_start", "pre_llm_call", "post_tool_call", "on_session_end"}
+    import inspect
+    assert [list(inspect.signature(cb).parameters) for cb in manager._hooks["pre_llm_call"]] == \
+        [["session_id", "platform"]], "Hermes passes only declared fields: never ask for the user message"
     assert PLUGIN_KEY in manager._cli_commands
     assert "memory-history" in manager._plugin_commands, "the chat command must not collide with a built-in"
 
@@ -188,9 +192,94 @@ def test_turn_end_catches_changes_made_outside_tools(hermes_env):
     assert origin.calls == [] and origin.sessions == [("s1", "discord")]
 
 
-def test_resumed_session_platform_is_learned_at_turn_end(hermes_env):
+def test_write_approved_between_turns_is_not_credited_to_the_next_turn(hermes_env):
+    """With memory.write_approval on, the agent's writes are staged and `/memory approve`
+    applies one between turns, outside any hook. The next turn's calls change nothing, so no
+    version may name them or the session for the approved write."""
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+    from memory_rewind.provenance import parse_body
+    from tools import write_approval as wa
+    from tools.memory_tool import load_on_disk_store, memory_tool
+    manager, loaded = _load(hermes_env, config={"memory": {"write_approval": True}})
+    history = _history(hermes_env)
+    memory = hermes_env / "memories" / "MEMORY.md"
+
+    def agent_memory_call(operations):  # what the agent loop does: run the tool, then post_tool_call
+        result = memory_tool(action="", target="memory", operations=operations, store=load_on_disk_store())
+        manager.invoke_hook("post_tool_call", tool_name="memory", result=result, status="ok",
+                            args={"target": "memory", "operations": operations}, session_id="s1")
+        assert loaded.module.WORKER.flush(timeout=30)
+        return json.loads(result)
+
+    manager.invoke_hook("on_session_start", session_id="s1", platform="telegram")
+    assert manager.invoke_hook("pre_llm_call", session_id="s1", platform="telegram", user_message="hi",
+                               conversation_history=[]) == [], "the plugin must inject nothing"
+    staged = agent_memory_call([{"action": "add", "content": "approved later"}])
+    assert staged.get("staged") is True, staged
+    manager.invoke_hook("on_session_end", session_id="s1", completed=True, platform="telegram")
+    assert loaded.module.WORKER.flush(timeout=30)
+    before = history.commit_count()
+
+    handle_pending_subcommand(wa.MEMORY, ["approve", staged["pending_id"]], memory_store=load_on_disk_store())
+    assert "approved later" in memory.read_text(encoding="utf-8")
+
+    manager.invoke_hook("pre_llm_call", session_id="s1", platform="telegram")
+    assert agent_memory_call([{"action": "remove", "old_text": "first note"}]).get("staged") is True
+    manager.invoke_hook("on_session_end", session_id="s1", completed=True, platform="telegram")
+    assert loaded.module.WORKER.flush(timeout=30)
+
+    assert history.commit_count() == before + 1, "only the turn-start baseline is new"
+    newest = history.log(limit=1)[0]
+    assert newest.subject == "turn start" and ("M", "memories/MEMORY.md") in newest.changes
+    assert parse_body(newest.body).calls == [] and parse_body(newest.body).sessions == []
+    assert b"approved later" in history.read_blob("HEAD", "memories/MEMORY.md")
+
+
+def test_skill_archived_between_sessions_is_not_credited_to_the_next_one(hermes_env):
+    """The curator archives a skill while no session runs (no tool call, no turn); the next
+    session's baseline records the move without naming that session."""
+    from memory_rewind.provenance import parse_body
+    from tools import skill_usage
+    manager, loaded = _load(hermes_env)
+    history = _history(hermes_env)
+    manager.invoke_hook("on_session_start", session_id="s1", platform="telegram")
+
+    skill_usage.mark_agent_created("notes")  # curator-managed, like a skill the agent wrote
+    archived, message = skill_usage.archive_skill("notes")
+    assert archived, message
+
+    manager.invoke_hook("on_session_start", session_id="s2", platform="discord")
+    newest = history.log(limit=1)[0]
+    assert newest.subject == "session start"
+    assert ("D", "skills/productivity/notes/SKILL.md") in newest.changes
+    assert ("A", "skills/.archive/notes/SKILL.md") in newest.changes
+    assert parse_body(newest.body).sessions == []
+
+
+def test_turn_start_baseline_lets_queued_versions_land_first(hermes_env, monkeypatch):
+    """A call's version still queued when the next turn starts keeps its change and its call."""
+    from memory_rewind.provenance import parse_body
+    manager, loaded = _load(hermes_env)
+    history = _history(hermes_env)
+    worker = sys.modules[loaded.module.__name__ + ".worker"]
+    real_snapshot = worker.take_snapshot
+    monkeypatch.setattr(worker, "take_snapshot", lambda *a, **k: time.sleep(0.5) or real_snapshot(*a, **k))
+
+    manager.invoke_hook("on_session_start", session_id="s1", platform="cli")
+    (hermes_env / "memories" / "MEMORY.md").write_text("first note\nqueued\n", newline="\n")
+    manager.invoke_hook("post_tool_call", tool_name="memory", status="ok", session_id="s1",
+                        args={"target": "memory", "operations": [{"action": "add", "content": "queued"}]})
+    manager.invoke_hook("pre_llm_call", session_id="s1", platform="cli")
+    assert loaded.module.WORKER.flush(timeout=30)
+
+    newest = history.log(limit=1)[0]
+    assert newest.subject == "after memory"
+    assert parse_body(newest.body).calls == ["memory: add (memory)"]
+
+
+def test_resumed_session_platform_is_learned_from_turn_hooks(hermes_env):
     """A session resumed in a fresh process gets no on_session_start: its platform is unknown
-    (never guessed) until a turn ends, and known for the tool calls after that."""
+    (never guessed) until a turn starts or ends, and known for the tool calls after that."""
     from memory_rewind.provenance import parse_body
     manager, loaded = _load(hermes_env)
     history = _history(hermes_env)
@@ -209,6 +298,12 @@ def test_resumed_session_platform_is_learned_at_turn_end(hermes_env):
     assert loaded.module.WORKER.flush(timeout=30)
     assert parse_body(history.log(limit=1)[0].body).sessions == [("resumed", "telegram")]
 
+    manager.invoke_hook("pre_llm_call", session_id="resumed-2", platform="slack")
+    memory.write_text("first note\nsecond\nthird\nfourth\n", newline="\n")
+    manager.invoke_hook("post_tool_call", tool_name="memory", args=args, status="ok", session_id="resumed-2")
+    assert loaded.module.WORKER.flush(timeout=30)
+    assert parse_body(history.log(limit=1)[0].body).sessions == [("resumed-2", "slack")]
+
 
 def test_multiplexed_profiles_keep_separate_histories(hermes_env, tmp_path):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -222,11 +317,14 @@ def test_multiplexed_profiles_keep_separate_histories(hermes_env, tmp_path):
         manager.invoke_hook("on_session_start", session_id="work-1")
         manager.invoke_hook("post_tool_call", tool_name="memory", args={}, session_id="work-1")
         assert loaded.module.WORKER.flush(timeout=30)
+        (other / "memories" / "MEMORY.md").write_text("work profile memory\nedited\n", newline="\n")
+        manager.invoke_hook("pre_llm_call", session_id="work-1", platform="telegram")
     finally:
         reset_hermes_home_override(token)
 
     work = _history(other)
-    assert work.read_blob("HEAD", "memories/MEMORY.md") == b"work profile memory\n"
+    assert work.read_blob("HEAD", "memories/MEMORY.md") == b"work profile memory\nedited\n"
+    assert work.log(limit=1)[0].subject == "turn start"
     default = _history(hermes_env)
     assert default.head() is None, "the launch profile must not receive the other profile's history"
 
@@ -248,7 +346,10 @@ def test_memory_history_chat_command_follows_the_profile(hermes_env, tmp_path):
         manager = hermes_plugins_mod.get_plugin_manager()
         handler = hermes_plugins_mod.get_plugin_command_handler("memory-history")
         assert handler is not None
+        worker = manager._plugins[PLUGIN_KEY].module.WORKER
         manager.invoke_hook("on_session_start", session_id="home-1", platform="cli")
+        (hermes_env / "memories" / "MEMORY.md").write_text("first note\nhome edit\n", newline="\n")
+        manager.invoke_hook("on_session_end", session_id="home-1", completed=True, platform="cli")
 
         work = tmp_path / "profiles" / "work"
         (work / "memories").mkdir(parents=True)
@@ -256,9 +357,12 @@ def test_memory_history_chat_command_follows_the_profile(hermes_env, tmp_path):
         token = set_hermes_home_override(work)
         try:
             manager.invoke_hook("on_session_start", session_id="work-1", platform="telegram")
+            (work / "memories" / "MEMORY.md").write_text("work profile memory\nwork edit\n", newline="\n")
+            manager.invoke_hook("on_session_end", session_id="work-1", completed=True, platform="telegram")
             work_context = contextvars.copy_context()
         finally:
             reset_hermes_home_override(token)
+        assert worker.flush(timeout=30)
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             work_view = pool.submit(work_context.run, handler, "").result()
@@ -268,9 +372,9 @@ def test_memory_history_chat_command_follows_the_profile(hermes_env, tmp_path):
 
         assert "from  telegram, session work-1" in work_view and "home-1" not in work_view
         assert "from  cli, session home-1" in home_view and "work-1" not in home_view
-        assert "+work profile memory" in version_view
+        assert "+work edit" in version_view
         assert hermes_plugins_mod.resolve_plugin_command_result(handler("help")).startswith("/memory-history")
-        assert _history(work).commit_count() == 1 and _history(hermes_env).commit_count() == 1, \
+        assert _history(work).commit_count() == 2 and _history(hermes_env).commit_count() == 2, \
             "viewing must not record a version"
     finally:
         hermes_plugins_mod._reset_plugin_managers_for_tests()

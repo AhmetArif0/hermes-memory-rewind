@@ -86,14 +86,32 @@ Triggers:
 | Hook | Mode | Reason |
 |---|---|---|
 | `on_session_start` | synchronous | baseline before the session can change anything |
+| `pre_llm_call` (each turn start) | synchronous | baseline before the turn can change anything |
 | `post_tool_call` for `memory`, `skill_manage`, and `write_file`/`patch` targeting a tracked path | background | capture each change as it happens |
-| `on_session_end` (each turn) | background | catch writes that do not go through a tool (curator, hub installs, terminal edits) |
+| `on_session_end` (each turn) | background | catch writes the turn made without a tool (terminal edits) |
+
+Both baselines name no call and no session. The turn about to start has changed
+nothing yet, so whatever they find was done by something else: a staged write
+approved with `/memory approve` or `/skills approve`, a curator run, an edit in the
+Desktop app, a hub install from the CLI, another session of the same profile.
+Crediting it to the session or calls that come next would be false. A baseline
+first lets queued snapshots land (up to 5 s), so it never takes a change that a
+queued version's call made.
+
+`pre_llm_call` is used because it fires once per turn before the agent loop, with
+the session id and platform (checked on Hermes v0.21.5 and main: after
+`on_session_start` on a first turn, before any tool call). Its callback declares
+only those two parameters, so Hermes passes it nothing else (not the user message
+or the conversation), and it returns nothing, so no context is injected. A
+`pre_tool_call` snapshot would also isolate each call, but Hermes fails
+`pre_tool_call` closed: a callback that is slow or raises blocks the tool, and a
+history plugin must never block a memory write.
 
 Hook callbacks resolve `HERMES_HOME` and the data directory in the caller's
 context (Hermes copies the profile context into bounded hook workers), then
 hand plain paths to a per-process background thread. The agent loop never waits
-on git beyond the ~35 ms session-start baseline. Requests for the same profile
-are coalesced, and an `atexit` handler gives queued snapshots up to 5 s to land
+on git beyond the ~40 ms baselines at session and turn start. Requests for the
+same profile are coalesced, and an `atexit` handler gives queued snapshots up to 5 s to land
 before a one-shot process (`hermes chat -q … --oneshot`) exits; without it the
 turn-end snapshot of such a run is lost.
 
@@ -124,10 +142,13 @@ session: 20260927_101200_ab12cd (telegram)
   only; the version's file list shows the paths.
 - **Sessions** come from `session_id`. The platform is not part of
   `post_tool_call`. It is learned from `on_session_start` (first turn of a new
-  session) and `on_session_end` (every turn), and kept in a bounded
-  per-process map (256 sessions, least recently reported first out). A
-  session resumed in a fresh process has no known platform until its first
-  turn ends. Until then it is recorded without one, never guessed.
+  session), `pre_llm_call` (every turn start) and `on_session_end` (every turn
+  end), and kept in a bounded per-process map (256 sessions, least recently
+  reported first out). When no hook has reported it, it is recorded without
+  one, never guessed.
+- **Limit:** snapshots after a call and at turn end run in the background and
+  usually land within a fraction of a second. A change something else makes in
+  that window, or while a turn is running, is recorded with that call or turn.
 - **Safety:** action names, targets and skill names are chosen by the model,
   so every value is reduced to a token of `[A-Za-z0-9_./:@+-]` before it is
   written. A token cannot contain a newline, space, comma or bracket, so it

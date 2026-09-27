@@ -19,4 +19,4 @@ def test_manifest_declares_exactly_the_registered_hooks():
     declared = sorted(line.strip()[2:] for line in hooks_block.splitlines() if line.strip().startswith("- "))
     source = (PLUGIN / "__init__.py").read_text(encoding="utf-8")
     registered = sorted(part.split('"')[1] for part in source.split("ctx.register_hook(")[1:])
-    assert declared == registered == ["on_session_end", "on_session_start", "post_tool_call"]
+    assert declared == registered == ["on_session_end", "on_session_start", "post_tool_call", "pre_llm_call"]
