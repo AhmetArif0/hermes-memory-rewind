@@ -136,7 +136,8 @@ class GitStore:
         # HEAD must name the ref snapshots publish to, whatever init.defaultBranch says.
         self._run(["symbolic-ref", "HEAD", REF], with_worktree=False)
         for key, value in (("commit.gpgsign", "false"), ("core.hooksPath", os.devnull),
-                           ("gc.auto", "256"), ("core.autocrlf", "false")):
+                           ("gc.auto", "256"), ("gc.autoDetach", "false"),
+                           ("core.autocrlf", "false")):
             self._run(["config", "--local", key, value], with_worktree=False)
 
     def destroy(self) -> None:
@@ -280,7 +281,9 @@ class GitStore:
     def _maybe_gc(self) -> None:
         try:
             if self.commit_count() % _GC_EVERY_N_COMMITS == 0:
-                self._run(["gc", "--auto", "--quiet"], check=False, with_worktree=False)
+                # Never leave a detached background gc process behind.
+                self._run(["-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"],
+                          check=False, with_worktree=False)
         except GitError:
             pass
 

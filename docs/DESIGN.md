@@ -52,7 +52,8 @@ Every git call runs with the same isolation Hermes uses for its own shadow
 checkpoints: `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` set explicitly,
 inherited `GIT_*` routing variables cleared, global and system git config
 ignored (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` → null device), signing off,
-literal pathspecs, a timeout, and no console window on Windows. The user's own
+literal pathspecs, a timeout, no console window on Windows, and `gc.autoDetach`
+off so periodic `git gc --auto` never leaves a background process behind. The user's own
 git configuration, hooks and signing setup are never involved.
 
 ## Snapshots

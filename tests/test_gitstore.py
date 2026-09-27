@@ -133,3 +133,28 @@ def test_stat_cache_is_optional(store, snap, home):
     assert snap("change")
     assert store.read_blob("HEAD", "SOUL.md") == b"after cache loss"
     assert snap("again") is None
+
+
+def test_repo_never_detaches_background_gc(store, snap):
+    snap("baseline")
+    assert store._out(["config", "--local", "--get", "gc.autoDetach"], with_worktree=False) == "false"
+
+
+def test_periodic_gc_command_succeeds(store, snap, monkeypatch):
+    """_maybe_gc swallows failures on purpose; prove the command itself is valid and runs."""
+    import memory_rewind.gitstore as gs
+    calls = []
+    real_run = gs.GitStore._run
+
+    def recording_run(self, args, **kwargs):
+        proc = real_run(self, args, **kwargs)
+        if "gc" in args:
+            calls.append((args, proc.returncode, proc.stderr))
+        return proc
+
+    monkeypatch.setattr(gs, "_GC_EVERY_N_COMMITS", 1)
+    monkeypatch.setattr(gs.GitStore, "_run", recording_run)
+    snap("baseline")
+    assert calls, "gc was not attempted"
+    args, code, err = calls[-1]
+    assert args[:3] == ["-c", "gc.autoDetach=false", "gc"] and code == 0, err
