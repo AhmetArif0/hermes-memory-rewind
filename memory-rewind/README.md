@@ -145,6 +145,17 @@ The end-to-end tests load the plugin through Hermes' real plugin manager, drive 
 memory tool and hook dispatch, run the `hermes` CLI, and check that separate profiles
 keep separate histories.
 
+## Changes
+
+- **1.1.0**: `log` shows what produced each version: the tool call (tool, actions,
+  memory target or skill names, and the outcome when it did not succeed) and the
+  session and platform. Hermes' skill lock files and curator/Termux state files are no
+  longer recorded. Before, every `skill_manage` call added a version holding only a
+  lock file. Older versions that contain them never restore them. After upgrading,
+  the first new version lists them as removed from the history; the files on disk
+  are not touched.
+- **1.0.0**: first release.
+
 ## License
 
 MIT
