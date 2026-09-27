@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .gitstore import GitError, GitStore, GitUnavailable
+from .provenance import MAX_CALLS, build_body
 from .tracking import TrackingOptions, collect_tracked_files
 
 logger = logging.getLogger("memory_rewind")
@@ -26,20 +27,30 @@ class SnapshotRequest:
     data_dir: Path
     options: TrackingOptions
     reasons: list[str] = field(default_factory=list)
-    sessions: list[str] = field(default_factory=list)
+    sessions: dict[str, str] = field(default_factory=dict)  # session id -> platform ("" if unknown)
+    calls: list[str] = field(default_factory=list)  # first MAX_CALLS call summaries
+    total_calls: int = 0
+
+    def add_session(self, session_id: str, platform: str = "") -> None:
+        if session_id:  # an unknown platform never erases a known one
+            self.sessions[session_id] = platform or self.sessions.get(session_id, "")
+
+    def add_call(self, call: str) -> None:
+        if call:
+            self.total_calls += 1
+            if len(self.calls) < MAX_CALLS:
+                self.calls.append(call)
 
 
 def take_snapshot(home: Path, data_dir: Path, options: TrackingOptions, reasons: list[str],
-                  sessions: list[str] = ()) -> str | None:
+                  sessions: dict[str, str] | None = None, calls: list[str] = (),
+                  total_calls: int = 0) -> str | None:
     """Snapshot synchronously. Returns the new commit id, or None when nothing changed."""
     files = collect_tracked_files(home, options)
     unique = list(OrderedDict.fromkeys(r for r in reasons if r)) or ["snapshot"]
     subject = "; ".join(unique)[:200]
-    body_lines = []
-    ids = [s for s in OrderedDict.fromkeys(sessions) if s]
-    if ids:
-        body_lines.append("session: " + ", ".join(ids[:5]))
-    return GitStore(home, data_dir).snapshot(files, subject, "\n".join(body_lines))
+    body = build_body(list(calls), total_calls, dict(sessions or {}))
+    return GitStore(home, data_dir).snapshot(files, subject, body)
 
 
 class SnapshotWorker:
@@ -51,16 +62,17 @@ class SnapshotWorker:
         self._busy = False
 
     def submit(self, home: Path, data_dir: Path, options: TrackingOptions, reason: str,
-               session_id: str = "") -> None:
+               session_id: str = "", platform: str = "", call: str = "") -> None:
         key = str(data_dir)
         with self._lock:
             request = self._pending.get(key)
             if request is None:
                 request = self._pending[key] = SnapshotRequest(home, data_dir, options)
             request.options = options
-            request.reasons.append(reason)
-            if session_id:
-                request.sessions.append(session_id)
+            if reason not in request.reasons:
+                request.reasons.append(reason)
+            request.add_session(session_id, platform)
+            request.add_call(call)
             self._ensure_thread()
             self._lock.notify()
 
@@ -81,8 +93,8 @@ class SnapshotWorker:
                 _key, request = self._pending.popitem(last=False)
                 self._busy = True
             try:
-                take_snapshot(request.home, request.data_dir, request.options,
-                              request.reasons, request.sessions)
+                take_snapshot(request.home, request.data_dir, request.options, request.reasons,
+                              request.sessions, request.calls, request.total_calls)
             except GitUnavailable as exc:
                 self._warn_once("git-missing", "memory-rewind: git is unavailable, history paused (%s)", exc)
             except (GitError, OSError) as exc:

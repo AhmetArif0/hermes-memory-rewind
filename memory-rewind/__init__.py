@@ -6,12 +6,14 @@ import logging
 from pathlib import Path
 
 from .gitstore import GitError, GitUnavailable
+from .provenance import SessionPlatforms, describe_call
 from .tracking import DEFAULT_MAX_FILE_KB, TrackingOptions
 from .worker import WORKER, take_snapshot
 
 logger = logging.getLogger("memory_rewind")
 
 PLUGIN_NAME = "memory-rewind"
+SESSIONS = SessionPlatforms()
 
 # Tools that edit the tracked files directly.
 _KNOWLEDGE_TOOLS = frozenset({"memory", "skill_manage"})
@@ -65,19 +67,21 @@ def _touches_tracked_path(args) -> bool:
 
 
 def register(ctx) -> None:
-    def on_session_start(session_id: str = "", **_kwargs) -> None:
+    def on_session_start(session_id: str = "", platform: str = "", **_kwargs) -> None:
         # Baseline before the session can change anything; ~35 ms once the history exists.
+        SESSIONS.remember(session_id, platform)
         if not _enabled(ctx):
             return
         try:
             take_snapshot(resolve_home(), resolve_data_dir(), read_options(ctx),
-                          ["session start"], [session_id])
+                          ["session start"], {session_id: platform or ""} if session_id else None)
         except GitUnavailable as exc:
             WORKER._warn_once("git-missing", "memory-rewind: git is unavailable, history paused (%s)", exc)
         except (GitError, OSError) as exc:
             logger.warning("memory-rewind: session-start snapshot failed: %s", exc)
 
-    def post_tool_call(tool_name: str = "", args=None, session_id: str = "", **_kwargs) -> None:
+    def post_tool_call(tool_name: str = "", args=None, session_id: str = "", status: str = "",
+                       **_kwargs) -> None:
         if tool_name in _KNOWLEDGE_TOOLS:
             reason = f"after {tool_name}"
         elif tool_name in _FILE_TOOLS and _touches_tracked_path(args):
@@ -85,12 +89,17 @@ def register(ctx) -> None:
         else:
             return
         if _enabled(ctx):
-            WORKER.submit(resolve_home(), resolve_data_dir(), read_options(ctx), reason, session_id)
+            # post_tool_call carries no platform; use what this session's hooks reported.
+            WORKER.submit(resolve_home(), resolve_data_dir(), read_options(ctx), reason, session_id,
+                          platform=SESSIONS.lookup(session_id),
+                          call=describe_call(tool_name, args, status))
 
-    def on_session_end(session_id: str = "", **_kwargs) -> None:
+    def on_session_end(session_id: str = "", platform: str = "", **_kwargs) -> None:
         # Catches writes that bypass tools: curator runs, hub installs, terminal edits.
+        SESSIONS.remember(session_id, platform)
         if _enabled(ctx):
-            WORKER.submit(resolve_home(), resolve_data_dir(), read_options(ctx), "turn end", session_id)
+            WORKER.submit(resolve_home(), resolve_data_dir(), read_options(ctx), "turn end", session_id,
+                          platform=platform or "")
 
     ctx.register_hook("on_session_start", on_session_start)
     ctx.register_hook("post_tool_call", post_tool_call)

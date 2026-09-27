@@ -7,6 +7,7 @@ import sys
 import time
 
 from .gitstore import GitError, GitStore, GitUnavailable
+from .provenance import parse_body
 from .restore import RestoreError, apply_restore, normalize_target, plan_restore
 from .worker import WORKER, take_snapshot
 
@@ -123,6 +124,12 @@ def _log(store: GitStore, paths: list[str], limit: int) -> int:
         files = len(commit.changes)
         noun = "file" if files == 1 else "files"
         print(f"{commit.sha[:10]}  {_when(commit.timestamp)}  {commit.subject}  ({files} {noun})")
+        origin = parse_body(commit.body)
+        for call in origin.calls:
+            print(f"    via   {call}")
+        if origin.sessions:
+            print("    from  " + "; ".join(f"{where}, session {sid}" if where else f"session {sid}"
+                                          for sid, where in origin.sessions))
         for status, path in commit.changes[:8]:
             print(f"    {status}  {path}")
         if files > 8:

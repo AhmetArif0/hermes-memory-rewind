@@ -94,6 +94,46 @@ Hermes syncs its bundled skills into `skills/`, so the first snapshot of a
 profile contains them too, and later versions show what `hermes update`
 changed in them.
 
+## Provenance
+
+Each version's commit body records what produced it, one fact per line:
+
+```text
+call: memory: remove, add (user)
+call: skill_manage: patch research/arxiv [error]
+session: 20260927_101200_ab12cd (telegram)
+```
+
+`hermes memory-rewind log` shows these as `via` and `from` lines.
+
+- **Calls** come from the `post_tool_call` payload: `tool_name`, `args` and
+  `status`. Both knowledge tools take an `operations` array, and the flat
+  single-op fields are still accepted, so both shapes are read with Hermes'
+  own precedence. For `memory`, a non-empty `operations` list wins over
+  `action`, and `target` names the store. For `skill_manage`, any `operations`
+  list wins, and an operation without a `name` uses the top-level `name`. The
+  outcome is shown unless it is `ok` (Hermes sends `ok`, `error`, `blocked`,
+  `cancelled` or `timeout`). `write_file`/`patch` calls are named by tool
+  only; the version's file list shows the paths.
+- **Sessions** come from `session_id`. The platform is not part of
+  `post_tool_call`. It is learned from `on_session_start` (first turn of a new
+  session) and `on_session_end` (every turn), and kept in a bounded
+  per-process map (256 sessions, least recently reported first out). A
+  session resumed in a fresh process has no known platform until its first
+  turn ends. Until then it is recorded without one, never guessed.
+- **Safety:** action names, targets and skill names are chosen by the model,
+  so every value is reduced to a token of `[A-Za-z0-9_./:@+-]` before it is
+  written. A token cannot contain a newline, space, comma or bracket, so it
+  cannot forge a line or a field. Message and file content is never recorded.
+- **Bounds:** at most 10 call lines (then `call: +N more`), 6 operations per
+  call line, and 5 session lines per version. A pending snapshot request keeps
+  at most 10 calls, plus a count of the rest.
+- **Meaning:** a `call:` line says the call happened between the previous
+  version and this one. Snapshots are coalesced, so a listed call did not
+  necessarily change a file itself. The file list is what changed.
+
+Bodies written by 1.0.0 (`session: a, b` on one line) are still read.
+
 ## Restore
 
 Restore is a user command (`hermes memory-rewind restore`), never an agent
@@ -121,6 +161,8 @@ session (`/new`).
 
 History keeps what the files contained. If the agent is asked to forget
 something, the removal is recorded but older versions still contain it.
+Commit bodies also hold session ids, platforms and skill names (see
+Provenance), never message content.
 `hermes memory-rewind forget --yes` deletes the whole history for the active
 profile.
 
@@ -135,10 +177,11 @@ are out of scope.
   compare-and-swap under a lost race, literal pathspecs, restore semantics,
   symlink refusal, exit flush) run without Hermes.
 - End-to-end tests load the plugin through Hermes' real `PluginManager`, drive
-  the real `memory` tool and hook dispatch, check multiplexed profiles keep
-  separate histories, and run `hermes memory-rewind log/restore/status` as a
-  subprocess. They run against the minimum supported release (v0.21.5) and
-  `main`.
+  the real `memory` tool and hook dispatch, call `skill_manage` through Hermes'
+  own dispatcher and global hook bus (so the provenance comes from the payload
+  Hermes really sends), check multiplexed profiles keep separate histories,
+  and run `hermes memory-rewind log/restore/status` as a subprocess. They run
+  against the minimum supported release (v0.21.5) and `main`.
 - Each safety property is mutation-checked: disabling it makes at least one
   test fail.
 - `hermes plugins validate` (including the install-time security scan) and

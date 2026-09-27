@@ -75,12 +75,13 @@ def test_real_memory_tool_change_is_recorded(hermes_env):
     assert baseline, "session start must record a baseline before anything changes"
 
     from tools.memory_tool import load_on_disk_store, memory_tool
-    result = json.loads(memory_tool(action="add", target="memory",
-                                    content="prefers concise answers", store=load_on_disk_store()))
+    # The batch shape the memory tool's schema asks the model to use.
+    args = {"target": "memory", "operations": [{"action": "add", "content": "prefers concise answers"}]}
+    result = json.loads(memory_tool(action="", target=args["target"], operations=args["operations"],
+                                    store=load_on_disk_store()))
     assert result.get("success") is not False, result
-    manager.invoke_hook("post_tool_call", tool_name="memory",
-                        args={"action": "add", "target": "memory", "content": "prefers concise answers"},
-                        result=json.dumps(result), status="success", session_id="s1")
+    manager.invoke_hook("post_tool_call", tool_name="memory", args=args,
+                        result=json.dumps(result), status="ok", session_id="s1")
     assert loaded.module.WORKER.flush(timeout=30)
 
     newest = history.log(limit=1)[0]
@@ -89,6 +90,60 @@ def test_real_memory_tool_change_is_recorded(hermes_env):
     assert ("M", "memories/MEMORY.md") in newest.changes
     assert b"prefers concise answers" in history.read_blob("HEAD", "memories/MEMORY.md")
     assert b"prefers concise answers" not in history.read_blob(baseline, "memories/MEMORY.md")
+    from memory_rewind.provenance import parse_body
+    origin = parse_body(newest.body)
+    assert origin.calls == ["memory: add (memory)"]
+    assert origin.sessions == [("s1", "cli")], "platform comes from the session's on_session_start"
+    assert b"prefers concise answers" not in newest.body.encode()
+
+
+def test_real_tool_dispatch_provenance(hermes_env, monkeypatch):
+    """skill_manage through Hermes' own dispatcher and global hook bus: the args, status and
+    session id the plugin sees are the ones Hermes really sends."""
+    from hermes_cli import plugins as hermes_plugins_mod
+    from hermes_cli.lifecycle import invoke_hook
+
+    _install(hermes_env)
+    hermes_plugins_mod._reset_plugin_managers_for_tests()
+    try:
+        hermes_plugins_mod.discover_plugins(force=True)
+        loaded = hermes_plugins_mod.get_plugin_manager()._plugins[PLUGIN_KEY]
+        assert loaded.error is None, loaded.error
+        described = []
+        real_describe = loaded.module.describe_call
+        monkeypatch.setattr(loaded.module, "describe_call",
+                            lambda *a: described.append(real_describe(*a)) or described[-1])
+
+        import tools.skill_manager_tool  # noqa: F401  (registers skill_manage)
+        from model_tools import handle_function_call
+
+        invoke_hook("on_session_start", session_id="s1", model="test-model", platform="telegram")
+        history = _history(hermes_env)
+        before = history.commit_count()
+        created = json.loads(handle_function_call("skill_manage", {"operations": [{
+            "action": "create", "name": "provenance-demo",
+            "content": "---\nname: provenance-demo\ndescription: Demo.\n---\nSteps.\n"}]},
+            task_id="t1", session_id="s1"))
+        assert created.get("success") is True, created
+        assert loaded.module.WORKER.flush(timeout=30)
+
+        newest = history.log(limit=1)[0]
+        assert history.commit_count() == before + 1 and newest.subject == "after skill_manage"
+        assert any(path.endswith("provenance-demo/SKILL.md") for _, path in newest.changes)
+        from memory_rewind.provenance import parse_body
+        origin = parse_body(newest.body)
+        assert origin.calls == ["skill_manage: create provenance-demo"]
+        assert origin.sessions == [("s1", "telegram")]
+
+        failed = json.loads(handle_function_call("skill_manage", {"operations": [{
+            "action": "patch", "name": "no-such-skill", "old_string": "a", "new_string": "b"}]},
+            task_id="t1", session_id="s1"))
+        assert failed.get("success") is not True, failed
+        assert loaded.module.WORKER.flush(timeout=30)
+        assert described[-1] == "skill_manage: patch no-such-skill [error]"
+        assert history.commit_count() == before + 1, "a failed call changes nothing, so no version"
+    finally:
+        hermes_plugins_mod._reset_plugin_managers_for_tests()
 
 
 def test_unrelated_tools_do_not_record(hermes_env):
@@ -122,11 +177,36 @@ def test_turn_end_catches_changes_made_outside_tools(hermes_env):
     archived = hermes_env / "skills" / ".archive" / "notes"
     archived.parent.mkdir(parents=True)
     shutil.move(str(hermes_env / "skills" / "productivity" / "notes"), str(archived))  # curator-style move
-    manager.invoke_hook("on_session_end", session_id="s1", completed=True)
+    manager.invoke_hook("on_session_end", session_id="s1", completed=True, platform="discord")
     assert loaded.module.WORKER.flush(timeout=30)
     newest = _history(hermes_env).log(limit=1)[0]
     assert newest.subject == "turn end"
     assert ("A", "skills/.archive/notes/SKILL.md") in newest.changes
+    from memory_rewind.provenance import parse_body
+    origin = parse_body(newest.body)
+    assert origin.calls == [] and origin.sessions == [("s1", "discord")]
+
+
+def test_resumed_session_platform_is_learned_at_turn_end(hermes_env):
+    """A session resumed in a fresh process gets no on_session_start: its platform is unknown
+    (never guessed) until a turn ends, and known for the tool calls after that."""
+    from memory_rewind.provenance import parse_body
+    manager, loaded = _load(hermes_env)
+    history = _history(hermes_env)
+    memory = hermes_env / "memories" / "MEMORY.md"
+    args = {"target": "memory", "operations": [{"action": "add", "content": "x"}]}
+
+    memory.write_text("first note\nsecond\n", newline="\n")
+    manager.invoke_hook("post_tool_call", tool_name="memory", args=args, status="ok", session_id="resumed")
+    assert loaded.module.WORKER.flush(timeout=30)
+    assert parse_body(history.log(limit=1)[0].body).sessions == [("resumed", "")]
+
+    manager.invoke_hook("on_session_end", session_id="resumed", completed=True, platform="telegram")
+    assert loaded.module.WORKER.flush(timeout=30)
+    memory.write_text("first note\nsecond\nthird\n", newline="\n")
+    manager.invoke_hook("post_tool_call", tool_name="memory", args=args, status="ok", session_id="resumed")
+    assert loaded.module.WORKER.flush(timeout=30)
+    assert parse_body(history.log(limit=1)[0].body).sessions == [("resumed", "telegram")]
 
 
 def test_multiplexed_profiles_keep_separate_histories(hermes_env, tmp_path):
@@ -169,16 +249,18 @@ def _hermes_cli(home: Path, *argv: str, input_text: str | None = None) -> subpro
 
 def test_cli_log_and_restore_end_to_end(hermes_env):
     manager, loaded = _load(hermes_env)
-    manager.invoke_hook("on_session_start", session_id="s1")
+    manager.invoke_hook("on_session_start", session_id="s1", platform="cli")
     history = _history(hermes_env)
     good = history.head()
     (hermes_env / "memories" / "MEMORY.md").write_text("", newline="\n")  # a wiped memory file
-    manager.invoke_hook("on_session_end", session_id="s1")
+    manager.invoke_hook("post_tool_call", tool_name="memory", status="ok", session_id="s1",
+                        args={"target": "memory", "operations": [{"action": "remove", "old_text": "first"}]})
     assert loaded.module.WORKER.flush(timeout=30)
 
     log = _hermes_cli(hermes_env, PLUGIN_KEY, "log", "memory")
     assert log.returncode == 0, log.stderr
-    assert good[:10] in log.stdout and "turn end" in log.stdout
+    assert good[:10] in log.stdout and "after memory" in log.stdout
+    assert "    via   memory: remove (memory)\n    from  cli, session s1\n" in log.stdout
 
     refused = _hermes_cli(hermes_env, PLUGIN_KEY, "restore", good[:10], "memory")
     assert refused.returncode == 1 and "--yes" in refused.stderr

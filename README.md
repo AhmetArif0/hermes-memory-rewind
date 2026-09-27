@@ -40,6 +40,20 @@ hermes memory-rewind forget --yes               # delete the whole history
 (`HEAD`, `HEAD~1`, … also work). Commands act on the active profile
 (`hermes -p <profile> memory-rewind …`).
 
+`log` shows what produced each version:
+
+```text
+$ hermes memory-rewind log user
+3f2a9c1b7e  2026-09-27 14:05  after memory  (1 file)
+    via   memory: remove, add (user)
+    from  telegram, session 20260927_140012_ab12cd
+    M  memories/USER.md
+```
+
+`via` names the tool call: the tool, its actions, and the memory target or skill
+names, with `[error]` (or `[blocked]`, `[timeout]`, …) when the call did not succeed.
+`from` names the session and, when Hermes reported it, the platform.
+
 Every restore records the current state first and prints the command that undoes it.
 Built-in memory is loaded when a session starts, so a restored `MEMORY.md`/`USER.md`
 takes effect in the next session (`/new`).
@@ -57,7 +71,8 @@ takes effect in the next session (`/new`).
 A version is recorded when a session starts (a baseline before anything can change),
 after each `memory` or `skill_manage` call (and file edits that target these paths),
 and at the end of each turn to catch changes made outside tools (curator runs, hub
-installs, terminal edits). Unchanged state records nothing.
+installs, terminal edits). Unchanged state records nothing. Each version notes the
+tool calls and sessions behind it; the file list shows what actually changed.
 
 History is a bare git repository at
 `~/.hermes/plugin-data/memory-rewind/history.git` (per profile). It is isolated from
@@ -87,7 +102,9 @@ plugins:
   tools and adds no slash commands. `register()` only registers; it does no I/O.
 - **What it reads:** `memories/MEMORY.md`, `memories/USER.md`, `SOUL.md` and `skills/`
   (minus the exclusions above), plus its own settings. It never opens `.env`,
-  `auth.json`, databases or `skills/.hub/`.
+  `auth.json`, databases or `skills/.hub/`. From hook payloads it keeps only the tool
+  name, action names, memory target, skill names, call outcome, session id and platform,
+  never message or file content.
 - **What it writes:** only `$HERMES_HOME/plugin-data/memory-rewind/` (the history
   repository and an index cache). Tracked files are written only when you run
   `restore`, and `forget` deletes only the history.
@@ -103,8 +120,9 @@ plugins:
 ## Privacy
 
 History keeps what the files contained. If you ask the agent to forget something,
-the removal is recorded, but older versions still contain it. Run
-`hermes memory-rewind forget --yes` to delete the history for the active profile.
+the removal is recorded, but older versions still contain it. Versions also note session
+ids, platforms and skill names. Run `hermes memory-rewind forget --yes` to delete the
+history for the active profile.
 
 ## Limits
 
