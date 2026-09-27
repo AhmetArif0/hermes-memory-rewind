@@ -31,11 +31,17 @@ def test_tracks_curator_archive(home, options):
 
 @pytest.mark.parametrize("rel", [
     "skills/.usage.json",
+    "skills/.usage.json.lock",
     "skills/.curator_ledger.jsonl",
+    "skills/.curator_state",
     "skills/.bundled_manifest",
+    "skills/.termux_bundled_sync_stamp",
     "skills/.curator_suppressed",
     "skills/.curator_suppressed_2026",
     "skills/.curator_backups/run-1.tar.gz",
+    "skills/.locks/ledger.lock",
+    "skills/.locks/2ed7578aa2126370dfda3c814495294bf4e1ccd1ab341295876d70a5b25dbd90.lock",
+    "skills/.locks/curator-run",
     "skills/.hub/lock.json",
     "skills/.hub/quarantine/evil/SKILL.md",
     "skills/.hub/index-cache/x.json",
@@ -107,6 +113,7 @@ def test_options_turn_off_soul_and_skills(home):
     ("skills", True), ("skills/productivity/notes", True), ("memories/MEMORY.md", True),
     ("SOUL.md", True), ("../SOUL.md", False), ("skills/../config.yaml", False), ("/etc/passwd", False),
     ("skills/.hub", False), ("skills/.hub/quarantine", False), ("skills/.curator_backups", False),
+    ("skills/.locks", False), ("skills/cat/s/yarn.lock", True),
     ("config.yaml", False), ("memories", False), ("skills/cat/.env", False),
 ])
 def test_restore_targets(options, rel, ok):

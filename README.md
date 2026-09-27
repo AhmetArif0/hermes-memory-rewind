@@ -50,7 +50,8 @@ takes effect in the next session (`/new`).
 |---|---|
 | `memories/MEMORY.md`, `memories/USER.md` | `.env`, `auth.json`, keys and certificates, database files |
 | `SOUL.md` | `skills/.hub/` (hub lock, audit log, cache, quarantined skills) |
-| `skills/**`, including `skills/.archive/` | `skills/.usage.json`, curator ledger and backups, bundled-skill manifest |
+| `skills/**`, including `skills/.archive/` | `skills/.usage.json`, curator ledger, state and backups, bundled-skill manifest |
+| | Hermes lock files (`skills/.locks/`, `skills/.usage.json.lock`) |
 | | symlinks, embedded git repositories, caches, files larger than `max_file_kb` |
 
 A version is recorded when a session starts (a baseline before anything can change),

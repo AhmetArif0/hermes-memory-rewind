@@ -27,9 +27,14 @@ Relative to the active profile's `HERMES_HOME`:
 
 Never tracked, anywhere under those roots:
 
-- Hermes bookkeeping that churns on every read or is itself a backup:
-  `skills/.usage.json`, `skills/.curator_ledger.jsonl`, `skills/.bundled_manifest`,
-  `skills/.curator_suppressed*`, `skills/.curator_backups/`.
+- Hermes bookkeeping that churns on every read or write, or is itself a backup:
+  `skills/.usage.json`, `skills/.usage.json.lock`, `skills/.curator_ledger.jsonl`,
+  `skills/.curator_state`, `skills/.bundled_manifest`,
+  `skills/.termux_bundled_sync_stamp`, `skills/.curator_suppressed*`,
+  `skills/.curator_backups/`, and `skills/.locks/` (the per-skill and ledger lock
+  files every `skill_manage` call creates). Hermes' own skill walkers skip
+  `.locks`, `.hub` and `.curator_backups` too (`EXCLUDED_SKILL_DIRS` in
+  `agent/skill_utils.py`).
 - `skills/.hub/`: the hub lock file, audit log, index cache and **quarantined**
   skills. Quarantined content must never become restorable.
 - Secret-shaped files: `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
@@ -96,7 +101,8 @@ tool. It:
 
 1. accepts only tracked targets (a memory file, `SOUL.md`, a path under
    `skills/`), rejecting absolute paths, `..`, excluded names and symlinked
-   parents;
+   parents, and never writes back a file today's rules exclude, even when an
+   older version recorded it;
 2. shows what will change and requires `--yes` (or an interactive "y");
 3. snapshots the current state first, so every restore can itself be undone;
 4. writes each file atomically (temp file in the same directory, then

@@ -64,6 +64,23 @@ def test_restore_archived_skill_back(home, store, snap, options):
     assert (home / "skills" / "productivity" / "notes" / "SKILL.md").read_text().endswith("Take notes.\n")
 
 
+def test_restore_never_writes_back_files_excluded_today(home, store, snap, options):
+    """1.0.0 recorded Hermes' skill lock files; restoring such a version must not recreate them."""
+    from memory_rewind.tracking import collect_tracked_files
+    lock = home / "skills" / ".locks" / "ledger.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", newline="\n")
+    old = store.snapshot(sorted(collect_tracked_files(home, options) + ["skills/.locks/ledger.lock"]),
+                         "a 1.0.0 version")
+    assert "skills/.locks/ledger.lock" in store.ls_tree(old, "skills")
+    lock.unlink()
+    (home / "skills" / "productivity" / "notes" / "SKILL.md").write_text("edited", newline="\n")
+    snap("edit")
+    plan = _restore(store, home, options, old, "skills")
+    assert list(plan.write) == ["skills/productivity/notes/SKILL.md"]
+    assert not lock.exists()
+
+
 def test_already_matching_is_empty_plan(home, store, snap, options):
     v1 = snap("v1")
     plan = plan_restore(store, home, v1, "memories/MEMORY.md", options)

@@ -15,12 +15,16 @@ MEMORY_FILES = ("memories/MEMORY.md", "memories/USER.md")
 SOUL_FILE = "SOUL.md"
 SKILLS_ROOT = "skills"
 
-# Hermes bookkeeping inside skills/: churns on every skill read, or is itself a backup.
-_SKILLS_BOOKKEEPING_FILES = frozenset({".usage.json", ".curator_ledger.jsonl", ".bundled_manifest"})
+# Hermes bookkeeping inside skills/: churns on every skill read or write, or is itself a backup.
+_SKILLS_BOOKKEEPING_FILES = frozenset({
+    ".usage.json", ".usage.json.lock", ".curator_ledger.jsonl", ".curator_state",
+    ".bundled_manifest", ".termux_bundled_sync_stamp",
+})
 _SKILLS_BOOKKEEPING_PREFIXES = (".curator_suppressed",)
 # .hub holds the hub lock, audit log, index cache and quarantined skills; quarantined
-# content must never become restorable.
-_SKILLS_EXCLUDED_DIRS = frozenset({".curator_backups", ".hub"})
+# content must never become restorable. .locks holds the per-skill and ledger lock files
+# every skill_manage call creates.
+_SKILLS_EXCLUDED_DIRS = frozenset({".curator_backups", ".hub", ".locks"})
 
 _NOISE_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
