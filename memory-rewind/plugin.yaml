@@ -1,0 +1,33 @@
+name: memory-rewind
+version: 1.0.0
+manifest_version: 2
+api_version: 1
+description: >-
+  Automatic version history for the agent's own memory (MEMORY.md, USER.md),
+  skills and SOUL.md — browse, diff and restore any past version.
+author: AhmetArif0
+license: MIT
+homepage: https://github.com/AhmetArif0/hermes-memory-rewind
+tags: [memory, skills, backup, history]
+requires_hermes: ">=0.21.5"
+provides_hooks:
+  - on_session_start
+  - post_tool_call
+  - on_session_end
+config_schema:
+  enabled:
+    type: bool
+    default: true
+    description: Record new versions automatically (existing history is kept when off).
+  track_skills:
+    type: bool
+    default: true
+    description: Version the skills/ tree, including curator-archived skills.
+  track_soul:
+    type: bool
+    default: true
+    description: Version SOUL.md.
+  max_file_kb:
+    type: int
+    default: 1024
+    description: Skip files larger than this many KiB.

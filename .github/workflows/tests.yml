@@ -1,0 +1,59 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 5 * * *"  # daily, to catch Hermes changes that break the plugin
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest
+      - run: python -m pytest tests -q -rs
+
+  hermes:
+    name: end-to-end (Hermes ${{ matrix.ref }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ref: v2026.9.24  # v0.21.5, the minimum in requires_hermes
+            sync: --extra dev
+          - ref: main
+            sync: --group dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.ref }}
+          path: hermes
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Hermes
+        working-directory: hermes
+        run: uv sync --frozen ${{ matrix.sync }}
+      - name: Test against Hermes
+        env:
+          PYTHONPATH: ${{ github.workspace }}/hermes
+        run: hermes/.venv/bin/python -m pytest tests -q -rs
+      - name: hermes plugins validate
+        env:
+          PYTHONPATH: ${{ github.workspace }}/hermes
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: hermes/.venv/bin/python -m hermes_cli.main plugins validate memory-rewind
