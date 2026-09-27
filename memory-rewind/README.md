@@ -165,6 +165,12 @@ keep separate histories.
 
 ## Changes
 
+- **1.2.0**: `/memory-history` shows the history from any chat surface (gateway platforms,
+  Desktop, TUI, CLI chat): recent versions, the versions of one file or skill, and what a
+  version changed. It is read-only and follows the profile of the chat it runs in.
+  **Fix:** some edits were missed. If an edit kept a file's size and landed in the same
+  second as the previous snapshot, it could go unrecorded, and the newest version then
+  kept the old content.
 - **1.1.0**: `log` shows what produced each version: the tool call (tool, actions,
   memory target or skill names, and the outcome when it did not succeed) and the
   session and platform. Hermes' skill lock files and curator/Termux state files are no
