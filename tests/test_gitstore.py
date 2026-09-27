@@ -135,6 +135,41 @@ def test_stat_cache_is_optional(store, snap, home):
     assert snap("again") is None
 
 
+def test_same_size_edit_in_the_same_second_is_recorded(home, store, snap):
+    """git trusts a cached stat entry unless the index is as new as the file ("racy git"). The cached
+    index must keep its own write time when copied, or an edit of the same size in the same second as
+    the previous snapshot is never recorded (the newest version then keeps the old content)."""
+    import time
+    soul = home / "SOUL.md"
+    then = time.time() - 3600  # a fixed second both writes and the index share
+    soul.write_text("version A\n", newline="\n")
+    os.utime(soul, (then, then))
+    snap("A")
+    # Deterministic: compare mtime/size/inode only, and date the index to the same second.
+    store._run(["config", "--local", "core.trustctime", "false"], with_worktree=False)
+    os.utime(store.cache_index, (then, then))
+    soul.write_text("version B\n", newline="\n")
+    os.utime(soul, (then, then))
+    assert snap("B"), "the changed file was not recorded"
+    assert store.read_blob("HEAD", "SOUL.md") == b"version B\n"
+
+
+def test_cached_index_keeps_gits_write_time(store, snap, monkeypatch):
+    """Promoting the stat cache must keep the time git wrote the index (see the test above)."""
+    import time
+    then = int(time.time()) - 3600
+    real_stage = GitStore._stage
+
+    def stage_dated(self, index, files):
+        tree = real_stage(self, index, files)
+        os.utime(index, (then, then))  # as if git had written this index an hour ago
+        return tree
+
+    monkeypatch.setattr(GitStore, "_stage", stage_dated)
+    snap("baseline")
+    assert int(store.cache_index.stat().st_mtime) == then
+
+
 def test_repo_never_detaches_background_gc(store, snap):
     snap("baseline")
     assert store._out(["config", "--local", "--get", "gc.autoDetach"], with_worktree=False) == "false"

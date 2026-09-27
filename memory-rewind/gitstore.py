@@ -231,7 +231,10 @@ class GitStore:
             tmp_index = self.data_dir / f"index.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}"
             try:
                 if self.cache_index.is_file():
-                    shutil.copyfile(self.cache_index, tmp_index)
+                    # copy2 keeps the index file's mtime. git trusts a cached stat entry only when
+                    # the index is newer than the file ("racy git"); a fresh mtime here would make
+                    # a same-size edit in the same second as the last snapshot look unchanged.
+                    shutil.copy2(self.cache_index, tmp_index)
                 tree = self._stage(tmp_index, files)
                 if old is not None and tree == self._out(["rev-parse", f"{old}^{{tree}}"],
                                                           with_worktree=False):
@@ -269,11 +272,12 @@ class GitStore:
         return self._out(["write-tree"], index=index)
 
     def _promote_index(self, tmp_index: Path) -> None:
-        """Keep the freshest stat cache for the next snapshot (best effort; never required)."""
+        """Keep the freshest stat cache for the next snapshot (best effort; never required).
+        The copy keeps git's write time of the index (see snapshot)."""
         try:
             fd, staged = tempfile.mkstemp(prefix="index.tmp.promote.", dir=self.data_dir)
             os.close(fd)
-            shutil.copyfile(tmp_index, staged)
+            shutil.copy2(tmp_index, staged)
             os.replace(staged, self.cache_index)
         except OSError:
             pass

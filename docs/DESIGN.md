@@ -69,10 +69,17 @@ index, writes a tree, and commits only when the tree changed.
 - Concurrency: several Hermes processes can share a profile (gateway, CLI,
   kanban workers). Each snapshot stages into its own temporary copy of a cached
   index and publishes with a compare-and-swap `git update-ref` against the head
-  it started from; on a lost race it retries. The cached index is only a
-  stat-cache accelerator; correctness never depends on it. No lock files.
-- Cost on a realistic home (1,119 skill files, 15 MB): about 0.7 s for the
-  first snapshot, about 35 ms afterwards.
+  it started from; on a lost race it retries. No lock files.
+- The cached index is a stat cache: losing it only costs a re-hash.
+  - Every copy of it keeps the index file's mtime.
+  - git re-reads a file whose stat looks unchanged only when the index is not
+    newer than the file ("racy git"). A copy with a fresh mtime therefore made a
+    same-size edit in the same second as the last snapshot look unchanged.
+  - Before 1.2.0 that lost about 1 in 100–250 such rapid edits in a stress loop,
+    and the newest version kept the old content.
+- Cost: on a default install (332 files, the bundled skills included) the first
+  snapshot took 0.33 s and later ones about 47 ms. On a 1,119-file tree (every
+  optional skill installed too, 15 MB) they took 0.7 s and about 35 ms.
 
 Triggers:
 
