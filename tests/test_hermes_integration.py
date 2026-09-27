@@ -65,6 +65,7 @@ def test_loads_through_the_real_plugin_manager(hermes_env):
     assert loaded.enabled is True
     assert set(loaded.hooks_registered) == {"on_session_start", "post_tool_call", "on_session_end"}
     assert PLUGIN_KEY in manager._cli_commands
+    assert "memory-history" in manager._plugin_commands, "the chat command must not collide with a built-in"
 
 
 def test_real_memory_tool_change_is_recorded(hermes_env):
@@ -228,6 +229,51 @@ def test_multiplexed_profiles_keep_separate_histories(hermes_env, tmp_path):
     assert work.read_blob("HEAD", "memories/MEMORY.md") == b"work profile memory\n"
     default = _history(hermes_env)
     assert default.head() is None, "the launch profile must not receive the other profile's history"
+
+
+def test_memory_history_chat_command_follows_the_profile(hermes_env, tmp_path):
+    """`/memory-history` through Hermes' own command lookup (the one CLI, gateway and TUI use). The
+    gateway runs sync handlers on a pool thread with the caller's context copied, which is how a
+    multiplexed profile reaches the handler: each profile must see only its own history."""
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    from hermes_cli import plugins as hermes_plugins_mod
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    _install(hermes_env)
+    hermes_plugins_mod._reset_plugin_managers_for_tests()
+    try:
+        hermes_plugins_mod.discover_plugins(force=True)
+        manager = hermes_plugins_mod.get_plugin_manager()
+        handler = hermes_plugins_mod.get_plugin_command_handler("memory-history")
+        assert handler is not None
+        manager.invoke_hook("on_session_start", session_id="home-1", platform="cli")
+
+        work = tmp_path / "profiles" / "work"
+        (work / "memories").mkdir(parents=True)
+        (work / "memories" / "MEMORY.md").write_text("work profile memory\n", newline="\n")
+        token = set_hermes_home_override(work)
+        try:
+            manager.invoke_hook("on_session_start", session_id="work-1", platform="telegram")
+            work_context = contextvars.copy_context()
+        finally:
+            reset_hermes_home_override(token)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            work_view = pool.submit(work_context.run, handler, "").result()
+            home_view = pool.submit(contextvars.copy_context().run, handler, "").result()
+            work_rev = _history(work).head()
+            version_view = pool.submit(work_context.run, handler, work_rev[:10]).result()
+
+        assert "from  telegram, session work-1" in work_view and "home-1" not in work_view
+        assert "from  cli, session home-1" in home_view and "work-1" not in home_view
+        assert "+work profile memory" in version_view
+        assert hermes_plugins_mod.resolve_plugin_command_result(handler("help")).startswith("/memory-history")
+        assert _history(work).commit_count() == 1 and _history(hermes_env).commit_count() == 1, \
+            "viewing must not record a version"
+    finally:
+        hermes_plugins_mod._reset_plugin_managers_for_tests()
 
 
 def test_disabled_setting_stops_recording(hermes_env):

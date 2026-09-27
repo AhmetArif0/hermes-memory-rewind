@@ -105,8 +105,13 @@ def register(ctx) -> None:
     ctx.register_hook("post_tool_call", post_tool_call)
     ctx.register_hook("on_session_end", on_session_end)
 
+    from .chat import COMMAND, handle_slash
     from .cli import build_parser, run_cli
 
+    # Read-only view for chat surfaces (Telegram, Discord, Desktop, TUI, CLI chat); restore stays on the host.
+    ctx.register_command(COMMAND, handler=lambda raw_args: handle_slash(raw_args, ctx),
+                         description="Show the version history of memory, skills and SOUL.md (read-only)",
+                         args_hint="[memory|user|soul|skills/<path>|<version> [target]]")
     ctx.register_cli_command(
         name=PLUGIN_NAME,
         help="Browse, diff and restore the history of memory, skills and SOUL.md",

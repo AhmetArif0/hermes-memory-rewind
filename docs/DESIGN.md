@@ -141,6 +141,47 @@ session: 20260927_101200_ab12cd (telegram)
 
 Bodies written by 1.0.0 (`session: a, b` on one line) are still read.
 
+## In-chat history (`/memory-history`)
+
+A plugin slash command (`ctx.register_command`) that shows the history from the surfaces where
+people actually talk to the agent. Hermes dispatches plugin commands from the CLI chat,
+the messaging gateway and the TUI/Desktop RPC (`command.dispatch`). The versions it
+shows:
+
+- `/memory-history`: the last 10 versions.
+- `/memory-history <memory|user|soul|skills/<path>>`: the last 10 versions of one target.
+- `/memory-history <version> [target]`: what that version changed against the one before
+  it (`git diff-tree -p --root`, so the first version shows its content as added).
+
+Decisions:
+
+- **Profile.** The handler resolves `HERMES_HOME` when it is called, never at
+  registration.
+  - The gateway runs each message under its routed profile's scope and runs sync plugin
+    handlers on a pool thread with the context copied.
+  - The TUI/Desktop wraps `command.dispatch` in the session's home scope.
+  - So each profile sees only its own history. A test drives this through Hermes' own
+    command lookup, and the TUI RPC was checked by hand on v0.21.5 and `main`.
+- **Read-only.** Viewing never records a version. It waits up to 2 s for a snapshot
+  queued at the end of the last turn, so that change is visible. Restore stays a host
+  command; the version view prints the exact `hermes memory-rewind restore <version>~1
+  <target>` line.
+- **Format.** Plain text, like Hermes' bundled `disk-cleanup` command. Telegram's
+  formatter escapes `_` and `[]`, and Discord and Slack do not italicise underscores
+  inside words.
+  - Chat shows 3 files per version. A reply is cut at 3,000 characters on a line
+    boundary, the budget Hermes' own `/skills diff` uses in chat.
+  - A cut reply points at the full `hermes memory-rewind` command. Discord splits
+    anything over 2,000 characters itself.
+- **Group chats.**
+  - A reply never includes host paths or raw git errors. Unexpected git failures go to
+    the Hermes log and the reply says so. Only messages built from the user's own input
+    (an unknown version, an untracked target) are shown.
+  - Targets are only memory aliases, `SOUL.md`, `memories/…` and `skills/…`; an absolute
+    path is read as a version id and rejected.
+  - What a version changed in memory is visible to everyone in the chat. Hermes' own
+    `/memory pending` shows pending memory writes the same way.
+
 ## Restore
 
 Restore is a user command (`hermes memory-rewind restore`), never an agent
@@ -186,9 +227,10 @@ are out of scope.
 - End-to-end tests load the plugin through Hermes' real `PluginManager`, drive
   the real `memory` tool and hook dispatch, call `skill_manage` through Hermes'
   own dispatcher and global hook bus (so the provenance comes from the payload
-  Hermes really sends), check multiplexed profiles keep separate histories,
-  and run `hermes memory-rewind log/restore/status` as a subprocess. They run
-  against the minimum supported release (v0.21.5) and `main`.
+  Hermes really sends), check multiplexed profiles keep separate histories
+  (for recording and for `/memory-history`), and run
+  `hermes memory-rewind log/restore/status` as a subprocess. They run against
+  the minimum supported release (v0.21.5) and `main`.
 - Each safety property is mutation-checked: disabling it makes at least one
   test fail.
 - `hermes plugins validate` (including the install-time security scan) and

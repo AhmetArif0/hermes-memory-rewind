@@ -48,6 +48,10 @@ class GitError(RuntimeError):
     """A git command failed."""
 
 
+class UnknownRevision(GitError):
+    """A user-supplied version id is malformed or not in this history (safe to show the user)."""
+
+
 def find_git() -> str | None:
     return shutil.which("git")
 
@@ -163,12 +167,12 @@ class GitStore:
     def resolve(self, rev: str) -> str:
         """Resolve a user-supplied revision to a full commit id inside this history."""
         if not rev or rev.startswith("-") or any(c.isspace() for c in rev):
-            raise GitError(f"invalid revision: {rev!r}")
+            raise UnknownRevision(f"invalid revision: {rev!r}")
         proc = self._run(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
                          check=False, with_worktree=False)
         out = proc.stdout.decode().strip()
         if proc.returncode != 0 or not out:
-            raise GitError(f"unknown revision: {rev}")
+            raise UnknownRevision(f"unknown revision: {rev}")
         return out
 
     def commit_count(self) -> int:
@@ -176,12 +180,13 @@ class GitStore:
             return 0
         return int(self._out(["rev-list", "--count", REF], with_worktree=False) or 0)
 
-    def log(self, paths: Iterable[str] = (), limit: int = 20) -> list[Commit]:
+    def log(self, paths: Iterable[str] = (), limit: int = 20, rev: str = REF) -> list[Commit]:
+        """Versions reachable from *rev* (default: the newest), newest first."""
         if not self.head():
             return []
         sep, end = "\x1f", "\x1e"
         args = ["log", f"--max-count={max(1, limit)}", "--name-status", "--no-renames",
-                f"--format={end}%H{sep}%ct{sep}%s{sep}%b{sep}", REF, "--", *paths]
+                f"--format={end}%H{sep}%ct{sep}%s{sep}%b{sep}", rev, "--", *paths]
         raw = self._run(args, with_worktree=False).stdout.decode("utf-8", "replace")
         commits: list[Commit] = []
         for chunk in raw.split(end):
@@ -212,6 +217,12 @@ class GitStore:
 
     def read_blob(self, rev: str, path: str) -> bytes:
         return self._run(["cat-file", "blob", f"{rev}:{path}"], with_worktree=False).stdout
+
+    def changes(self, rev: str, paths: Iterable[str] = ()) -> str:
+        """Patch of what version *rev* changed against its parent (a first version: everything added)."""
+        args = ["diff-tree", "-p", "-r", "--root", "--no-commit-id", "--no-color", "--no-ext-diff",
+                "--no-renames", rev, "--", *paths]
+        return self._run(args, with_worktree=False).stdout.decode("utf-8", "replace")
 
     def diff(self, old: str, new: str, paths: Iterable[str] = (), stat_only: bool = False) -> str:
         args = ["diff", "--no-color", "--no-ext-diff", "--no-renames"]

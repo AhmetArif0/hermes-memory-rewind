@@ -54,6 +54,21 @@ $ hermes memory-rewind log user
 names, with `[error]` (or `[blocked]`, `[timeout]`, …) when the call did not succeed.
 `from` names the session and, when Hermes reported it, the platform.
 
+### From a chat
+
+`/memory-history` shows the same history from any chat: Telegram, Discord and other
+gateway platforms, the Desktop app, the TUI and the CLI chat. It is read-only.
+
+```text
+/memory-history                          the last 10 versions
+/memory-history user                     versions of USER.md (also memory, soul, skills/<path>)
+/memory-history <version> [target]       what that version changed
+```
+
+Viewing never records a version. Restoring stays a host command; the version view prints
+the exact `hermes memory-rewind restore …` line to run. Replies are plain text and at most
+3,000 characters, and a reply never includes host paths or raw git errors.
+
 Every restore records the current state first and prints the command that undoes it.
 Built-in memory is loaded when a session starts, so a restored `MEMORY.md`/`USER.md`
 takes effect in the next session (`/new`).
@@ -98,8 +113,9 @@ plugins:
 - **No network access**, no downloads, no self-update, and no Python dependencies
   (standard library only). The only external program is the local `git` binary.
 - **What it registers:** the hooks `on_session_start`, `post_tool_call` and
-  `on_session_end`, and the `hermes memory-rewind` command. It gives the model no
-  tools and adds no slash commands. `register()` only registers; it does no I/O.
+  `on_session_end`, the `hermes memory-rewind` command, and one read-only slash
+  command, `/memory-history`. It gives the model no tools. `register()` only
+  registers; it does no I/O.
 - **What it reads:** `memories/MEMORY.md`, `memories/USER.md`, `SOUL.md` and `skills/`
   (minus the exclusions above), plus its own settings. It never opens `.env`,
   `auth.json`, databases or `skills/.hub/`. From hook payloads it keeps only the tool
@@ -121,14 +137,16 @@ plugins:
 
 History keeps what the files contained. If you ask the agent to forget something,
 the removal is recorded, but older versions still contain it. Versions also note session
-ids, platforms and skill names. Run `hermes memory-rewind forget --yes` to delete the
-history for the active profile.
+ids, platforms and skill names. A `/memory-history` reply in a group chat is visible to
+everyone in it, including what a version changed in memory. Run
+`hermes memory-rewind forget --yes` to delete the history for the active profile.
 
 ## Limits
 
 - External memory providers (Honcho, Mem0, …) store data outside these files and are
   not covered.
-- Restore is a command you run; the agent has no tool to rewrite history or restore.
+- Restore is a command you run on the host; the agent has no tool to rewrite history or
+  restore, and `/memory-history` cannot restore.
 
 ## How it works
 

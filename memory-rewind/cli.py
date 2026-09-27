@@ -120,21 +120,28 @@ def _log(store: GitStore, paths: list[str], limit: int) -> int:
     if not commits:
         print("No versions touch that path yet.")
         return 0
+    print(format_log(commits))
+    return 0
+
+
+def format_log(commits, max_files: int = 8) -> str:
+    """One block per version: id, time, reason, where it came from and (up to *max_files*) what changed."""
+    lines = []
     for commit in commits:
         files = len(commit.changes)
         noun = "file" if files == 1 else "files"
-        print(f"{commit.sha[:10]}  {_when(commit.timestamp)}  {commit.subject}  ({files} {noun})")
+        lines.append(f"{commit.sha[:10]}  {_when(commit.timestamp)}  {commit.subject}  ({files} {noun})")
         origin = parse_body(commit.body)
         for call in origin.calls:
-            print(f"    via   {call}")
+            lines.append(f"    via   {call}")
         if origin.sessions:
-            print("    from  " + "; ".join(f"{where}, session {sid}" if where else f"session {sid}"
-                                          for sid, where in origin.sessions))
-        for status, path in commit.changes[:8]:
-            print(f"    {status}  {path}")
-        if files > 8:
-            print(f"    … {files - 8} more")
-    return 0
+            lines.append("    from  " + "; ".join(f"{where}, session {sid}" if where else f"session {sid}"
+                                                for sid, where in origin.sessions))
+        for status, path in commit.changes[:max_files]:
+            lines.append(f"    {status}  {path}")
+        if 0 < max_files < files:
+            lines.append(f"    … {files - max_files} more")
+    return "\n".join(lines)
 
 
 def _restore(store: GitStore, home, data_dir, options, args) -> int:
