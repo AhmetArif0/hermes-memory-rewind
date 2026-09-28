@@ -209,11 +209,15 @@ def _older_copy(data_dir, tmp_path):
 
 def _put_back(copy, data_dir):
     """What `hermes import` does with it: replace every file the copy holds (temp file +
-    os.replace, as Hermes extracts) and leave every other file alone."""
+    os.replace, as Hermes extracts) and leave every other file alone. A file already holding
+    the same bytes is left as is: git objects are named by their content and read-only, and
+    Windows refuses to replace a read-only file."""
     for src in sorted(copy.rglob("*")):
         if src.is_dir():
             continue
         dest = data_dir / src.relative_to(copy)
+        if dest.is_file() and dest.read_bytes() == src.read_bytes():
+            continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=dest.parent)
         os.close(fd)
