@@ -158,7 +158,7 @@ everyone in it, including what a version changed in memory. Run
 
 ## How it works
 
-See [docs/DESIGN.md](docs/DESIGN.md).
+See [docs/DESIGN.md](https://github.com/AhmetArif0/hermes-memory-rewind/blob/main/docs/DESIGN.md).
 
 ## Development
 
