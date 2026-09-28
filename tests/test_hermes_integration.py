@@ -423,3 +423,33 @@ def test_cli_log_and_restore_end_to_end(hermes_env):
 
     status = _hermes_cli(hermes_env, PLUGIN_KEY, "status")
     assert status.returncode == 0 and "Versions" in status.stdout
+
+
+def test_history_survives_hermes_import_of_an_older_backup(hermes_env, tmp_path):
+    """`hermes import` puts the backup's copy of the history back over the live one; the versions
+    recorded after the backup, the state right before the import included, must stay."""
+    manager, loaded = _load(hermes_env)
+    manager.invoke_hook("on_session_start", session_id="s1", platform="cli")
+    archive = tmp_path / "hermes-backup.zip"
+    made = _hermes_cli(hermes_env, "backup", "-o", str(archive))
+    assert made.returncode == 0, made.stderr
+
+    memory = hermes_env / "memories" / "MEMORY.md"
+    memory.write_text("first note\n§\nwritten after the backup", newline="\n")
+    manager.invoke_hook("post_tool_call", tool_name="memory", status="ok", session_id="s1",
+                        args={"target": "memory", "action": "add", "content": "written after the backup"})
+    assert loaded.module.WORKER.flush(timeout=30)
+    later = _history(hermes_env).head()
+
+    imported = _hermes_cli(hermes_env, "import", str(archive), "--force")
+    assert imported.returncode == 0, imported.stderr
+    assert memory.read_text() == "first note\n", "the import put the backup's memory back"
+    log = _hermes_cli(hermes_env, PLUGIN_KEY, "log", "memory")
+    assert log.returncode == 0 and later[:10] in log.stdout, log.stdout
+
+    manager.invoke_hook("pre_llm_call", session_id="s2", platform="cli")
+    history = _history(hermes_env)
+    assert history._is_ancestor(later, history.head())
+    undo = _hermes_cli(hermes_env, PLUGIN_KEY, "restore", later[:10], "memory", "--yes")
+    assert undo.returncode == 0, undo.stderr
+    assert memory.read_text() == "first note\n§\nwritten after the backup"

@@ -5,6 +5,15 @@ signing, inherited GIT_* routing), the same way Hermes isolates its own shadow
 checkpoints. Snapshots stage into a private temporary index and publish with a
 compare-and-swap ``update-ref``, so concurrent Hermes processes sharing a profile
 never corrupt each other and never need a lock file.
+
+An older copy of the repository can be put back over the live one: ``hermes import``
+of a backup overwrites every file the archive holds and leaves the rest alone. The
+ref then names the backup's head, and every version recorded after the backup,
+including the state right before the import, drops out of the history (and ``gc``
+later deletes it). So each published head also leaves an empty marker file named
+after it under ``tips/``. A marker newer than the backup survives the import, and a
+marker the head does not contain names history that was cut off: reads include it,
+and the next snapshot builds on it again.
 """
 
 from __future__ import annotations
@@ -28,6 +37,8 @@ _CAS_ATTEMPTS = 8
 _AUTHOR_NAME = "memory-rewind"
 _AUTHOR_EMAIL = "memory-rewind@localhost"
 _GC_EVERY_N_COMMITS = 50
+_HEX = frozenset("0123456789abcdef")
+REJOIN_REASON = "history restored from an older copy; later versions kept"
 
 # Routing variables a parent process (or a user's shell) may have exported; any of them
 # would redirect our git calls into someone else's repository or object store.
@@ -71,6 +82,7 @@ class GitStore:
         self.data_dir = Path(data_dir)
         self.repo = self.data_dir / "history.git"
         self.cache_index = self.data_dir / "index"
+        self.tips = self.data_dir / "tips"
         self.git = git or find_git()
         if not self.git:
             raise GitUnavailable("git was not found on PATH")
@@ -145,9 +157,11 @@ class GitStore:
             self._run(["config", "--local", key, value], with_worktree=False)
 
     def destroy(self) -> None:
-        """Delete the history repository and index cache (privacy: `forget`)."""
+        """Delete the history repository, index cache and tip markers (privacy: `forget`)."""
         if self.repo.exists():
             _force_rmtree(self.repo)
+        if self.tips.exists():
+            _force_rmtree(self.tips)
         for leftover in (self.cache_index, *self.data_dir.glob("index.tmp.*")):
             try:
                 leftover.unlink()
@@ -175,30 +189,43 @@ class GitStore:
             raise UnknownRevision(f"unknown revision: {rev}")
         return out
 
+    def _starts(self) -> list[str]:
+        """Where reads of the whole history begin: the head plus any tip an older copy cut off."""
+        head = self.head()
+        lost, _stale = self._classify_markers(head)
+        return [*([REF] if head else []), *lost]
+
     def commit_count(self) -> int:
-        if not self.head():
+        starts = self._starts()
+        if not starts:
             return 0
-        return int(self._out(["rev-list", "--count", REF], with_worktree=False) or 0)
+        return int(self._out(["rev-list", "--count", *starts], with_worktree=False) or 0)
 
     def log(self, paths: Iterable[str] = (), limit: int = 20, rev: str = REF) -> list[Commit]:
         """Versions reachable from *rev* (default: the newest), newest first."""
-        if not self.head():
+        starts = self._starts() if rev == REF else [rev]
+        if not starts:
             return []
         sep, end = "\x1f", "\x1e"
-        args = ["log", f"--max-count={max(1, limit)}", "--name-status", "--no-renames",
-                f"--format={end}%H{sep}%ct{sep}%s{sep}%b{sep}", rev, "--", *paths]
+        # --date-order: never a parent before its child, even when several starts share a second.
+        args = ["log", f"--max-count={max(1, limit)}", "--date-order", "--name-status", "--no-renames",
+                f"--format={end}%H{sep}%P{sep}%ct{sep}%s{sep}%b{sep}", *starts, "--", *paths]
         raw = self._run(args, with_worktree=False).stdout.decode("utf-8", "replace")
         commits: list[Commit] = []
         for chunk in raw.split(end):
             if not chunk.strip():
                 continue
-            sha, ts, subject, body, rest = chunk.split(sep, 4)
+            sha, parents, ts, subject, body, rest = chunk.split(sep, 5)
+            sha, parents = sha.strip(), parents.split()
+            if len(parents) > 1:  # git log shows no changes for a merge; list them against the first parent
+                rest = self._out(["diff-tree", "-r", "--name-status", "--no-renames", parents[0], sha,
+                                  "--", *paths], with_worktree=False)
             changes = []
             for line in rest.strip().splitlines():
                 status, _, path = line.partition("\t")
                 if path:
                     changes.append((status.strip(), path))
-            commits.append(Commit(sha.strip(), int(ts), subject, body.strip(), changes))
+            commits.append(Commit(sha, int(ts), subject, body.strip(), changes))
         return commits
 
     def ls_tree(self, rev: str, target: str) -> dict[str, str]:
@@ -219,9 +246,11 @@ class GitStore:
         return self._run(["cat-file", "blob", f"{rev}:{path}"], with_worktree=False).stdout
 
     def changes(self, rev: str, paths: Iterable[str] = ()) -> str:
-        """Patch of what version *rev* changed against its parent (a first version: everything added)."""
+        """Patch of what version *rev* changed against its (first) parent (a first version:
+        everything added)."""
+        parents = self._out(["rev-list", "--parents", "--max-count=1", rev], with_worktree=False).split()[1:]
         args = ["diff-tree", "-p", "-r", "--root", "--no-commit-id", "--no-color", "--no-ext-diff",
-                "--no-renames", rev, "--", *paths]
+                "--no-renames", *parents[:1], rev, "--", *paths]
         return self._run(args, with_worktree=False).stdout.decode("utf-8", "replace")
 
     def diff(self, old: str, new: str, paths: Iterable[str] = (), stat_only: bool = False) -> str:
@@ -239,6 +268,8 @@ class GitStore:
         self.ensure_repo()
         for _ in range(_CAS_ATTEMPTS):
             old = self.head()
+            lost, stale = self._classify_markers(old)
+            parents = self._parents(old, lost)
             tmp_index = self.data_dir / f"index.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}"
             try:
                 if self.cache_index.is_file():
@@ -247,20 +278,26 @@ class GitStore:
                     # a same-size edit in the same second as the last snapshot look unchanged.
                     shutil.copy2(self.cache_index, tmp_index)
                 tree = self._stage(tmp_index, files)
-                if old is not None and tree == self._out(["rev-parse", f"{old}^{{tree}}"],
-                                                          with_worktree=False):
+                if len(parents) == 1 and tree == self._out(["rev-parse", f"{parents[0]}^{{tree}}"],
+                                                           with_worktree=False):
+                    # Nothing changed. After an older copy replaced the head, this also points the
+                    # head back at the tip it cut off.
+                    if parents[0] != old and not self._publish(parents[0], old):
+                        continue
                     self._promote_index(tmp_index)
+                    self._mark_tip(parents[0], old, *lost, *stale)
                     return None
+                if lost:
+                    subject = f"{subject}; {REJOIN_REASON}"
                 message = subject if not body else f"{subject}\n\n{body}"
                 commit_args = ["commit-tree", tree, "-m", message]
-                if old is not None:
-                    commit_args[2:2] = ["-p", old]
+                for parent in reversed(parents):
+                    commit_args[2:2] = ["-p", parent]
                 new = self._out(commit_args, with_worktree=False)
-                cas = self._run(["update-ref", "-m", "memory-rewind snapshot", REF, new, old or _ZERO_OID],
-                                check=False, with_worktree=False)
-                if cas.returncode != 0:
+                if not self._publish(new, old):
                     continue  # another process moved the head first; restage against it
                 self._promote_index(tmp_index)
+                self._mark_tip(new, old, *lost, *stale)
                 self._maybe_gc()
                 return new
             finally:
@@ -269,6 +306,69 @@ class GitStore:
                 except FileNotFoundError:
                     pass
         raise GitError("could not publish snapshot: history head kept moving")
+
+    def _publish(self, new: str, expected: str | None) -> bool:
+        """Compare-and-swap the head from *expected* to *new*; False when another process moved it."""
+        return self._run(["update-ref", "-m", "memory-rewind snapshot", REF, new, expected or _ZERO_OID],
+                         check=False, with_worktree=False).returncode == 0
+
+    # ── tip markers (see the module docstring) ──────────────────────────────────
+
+    def _markers(self) -> list[str]:
+        try:
+            names = os.listdir(self.tips)
+        except OSError:
+            return []
+        return [n for n in names if len(n) in (40, 64) and set(n) <= _HEX]
+
+    def _mark_tip(self, new: str, *replaced: str | None) -> None:
+        """Leave a marker for the published head and drop the markers it now contains (best effort)."""
+        try:
+            self.tips.mkdir(exist_ok=True)
+            marker = self.tips / new
+            if not marker.exists():
+                marker.touch()
+        except OSError:
+            return
+        for sha in set(replaced) - {new, None, ""}:
+            try:
+                (self.tips / sha).unlink()
+            except OSError:
+                pass
+
+    def _is_ancestor(self, older: str, newer: str) -> bool:
+        return self._run(["merge-base", "--is-ancestor", older, newer], check=False,
+                         with_worktree=False).returncode == 0
+
+    def _classify_markers(self, head: str | None) -> tuple[list[str], list[str]]:
+        """(lost, stale). Lost: tips the head does not contain, newest first. Stale: markers safe
+        to drop (the head contains them, or their commit is gone). Only a marker other than the
+        head's own costs a git call, so the usual case (one marker, the head's) costs none."""
+        lost, stale = [], []
+        for sha in self._markers():
+            if sha == head:
+                continue
+            if self._run(["cat-file", "-e", f"{sha}^{{commit}}"], check=False,
+                         with_worktree=False).returncode != 0:
+                stale.append(sha)
+            elif head is not None and self._is_ancestor(sha, head):
+                stale.append(sha)
+            else:
+                lost.append(sha)
+        if len(lost) > 1:  # newest first by commit time
+            lost = self._out(["rev-list", "--no-walk=sorted", *lost], with_worktree=False).split()
+        return lost, stale
+
+    def _parents(self, head: str | None, lost: list[str]) -> list[str]:
+        """Parents for the next version. Usually just the head. When an older copy cut history off,
+        the newest cut-off tip comes first, so the version records what replaced it, followed by
+        any line not already contained in an earlier parent (the older copy's own head, when it
+        is not an ancestor of the tip)."""
+        parents: list[str] = []
+        for sha in [*lost, *([head] if head else [])]:
+            if not any(self._is_ancestor(sha, parent) for parent in parents):
+                parents.append(sha)
+        return parents
 
     def _stage(self, index: Path, files: list[str]) -> str:
         wanted = set(files)

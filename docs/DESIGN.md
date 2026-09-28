@@ -70,6 +70,18 @@ index, writes a tree, and commits only when the tree changed.
   kanban workers). Each snapshot stages into its own temporary copy of a cached
   index and publishes with a compare-and-swap `git update-ref` against the head
   it started from; on a lost race it retries. No lock files.
+- An older copy of the repository can be put back over it: `hermes import` of a
+  backup (the dashboard's import runs the same command) overwrites every file the
+  archive holds and leaves the rest. The ref then names the backup's head, and every
+  version recorded after the backup drops out of the history until `gc` deletes it.
+  So each published head also leaves an empty marker file named after it under
+  `plugin-data/memory-rewind/tips/`. A marker newer than the backup survives the
+  import. A marker the head does not contain names cut-off history: `log` includes
+  it, and the next snapshot builds on the newest such tip, so the import is recorded
+  as one change ("history restored from an older copy") that `restore` can undo.
+  A copy from an unrelated history (another machine) is joined as a second parent
+  instead of dropped; `log` lists a join's changes against the first parent. In the
+  usual case (one marker, the head's) this costs a directory listing and no git call.
 - The cached index is a stat cache: losing it only costs a re-hash.
   - Every copy of it keeps the index file's mtime.
   - git re-reads a file whose stat looks unchanged only when the index is not
