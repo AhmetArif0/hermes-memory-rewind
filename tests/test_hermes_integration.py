@@ -435,7 +435,7 @@ def test_history_survives_hermes_import_of_an_older_backup(hermes_env, tmp_path)
     assert made.returncode == 0, made.stderr
 
     memory = hermes_env / "memories" / "MEMORY.md"
-    memory.write_text("first note\n§\nwritten after the backup", newline="\n")
+    memory.write_text("first note\n§\nwritten after the backup", encoding="utf-8", newline="\n")
     manager.invoke_hook("post_tool_call", tool_name="memory", status="ok", session_id="s1",
                         args={"target": "memory", "action": "add", "content": "written after the backup"})
     assert loaded.module.WORKER.flush(timeout=30)
@@ -452,4 +452,4 @@ def test_history_survives_hermes_import_of_an_older_backup(hermes_env, tmp_path)
     assert history._is_ancestor(later, history.head())
     undo = _hermes_cli(hermes_env, PLUGIN_KEY, "restore", later[:10], "memory", "--yes")
     assert undo.returncode == 0, undo.stderr
-    assert memory.read_text() == "first note\n§\nwritten after the backup"
+    assert memory.read_text(encoding="utf-8") == "first note\n§\nwritten after the backup"

@@ -239,7 +239,7 @@ def test_an_older_copy_put_back_keeps_later_versions(home, store, snap, data_dir
     if not backup_has_markers:
         shutil.rmtree(copy / "tips")
     memory = home / "memories" / "MEMORY.md"
-    memory.write_text("first note\n§\nsecond note", newline="\n")
+    memory.write_text("first note\n§\nsecond note", encoding="utf-8", newline="\n")
     second = snap("second")
     memory.write_text("first note\n", newline="\n")  # the import writes the old file back too
     _put_back(copy, data_dir)
