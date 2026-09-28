@@ -173,6 +173,13 @@ keep separate histories.
 
 ## Changes
 
+- **1.3.2**: **Fix:** `restore` could replace what a running agent had just written. It
+  now applies only the plan it showed: it holds the memory tool's own lock on `MEMORY.md`
+  or `USER.md` while it checks and writes, and it refuses when a file changed after the
+  plan was made (for example, a gateway session stored a memory while you read the plan;
+  run the command again to see the new plan). For a memory file the plan also lists the
+  entries the restore brings back and the entries it removes: restoring the file to bring
+  back one deleted entry also removes the entries added after that version.
 - **1.3.1**: **Fix:** importing a Hermes backup (`hermes import`, also what the dashboard's
   import runs) put the backup's copy of the history back over the live one. Every version
   recorded after the backup, including the state right before the import, dropped out of
