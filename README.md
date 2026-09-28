@@ -173,6 +173,14 @@ keep separate histories.
 
 ## Changes
 
+- **1.3.1**: **Fix:** importing a Hermes backup (`hermes import`, also what the dashboard's
+  import runs) put the backup's copy of the history back over the live one. Every version
+  recorded after the backup, including the state right before the import, dropped out of
+  `log`, and git later deleted it for good. Each version now leaves a small marker, so
+  those versions stay in the history and the import itself is recorded as a change that
+  `restore` can undo. This protects any import made after 1.3.1 has run once (a session
+  start is enough), whichever version made the backup.
+  The design-notes link on the plugin page works again.
 - **1.3.0**: **Fix:** changes made outside the agent's turns were credited to whatever
   came next. With `memory.write_approval` on, a write approved with `/memory approve`
   appeared as the agent's next memory call (for example `via memory: remove` on a
