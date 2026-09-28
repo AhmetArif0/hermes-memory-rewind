@@ -414,6 +414,7 @@ def test_cli_log_and_restore_end_to_end(hermes_env):
 
     refused = _hermes_cli(hermes_env, PLUGIN_KEY, "restore", good[:10], "memory")
     assert refused.returncode == 1 and "--yes" in refused.stderr
+    assert "          brings back: first note\n" in refused.stdout, refused.stdout
     assert (hermes_env / "memories" / "MEMORY.md").read_text() == ""
 
     done = _hermes_cli(hermes_env, PLUGIN_KEY, "restore", good[:10], "memory", "--yes")
@@ -453,3 +454,63 @@ def test_history_survives_hermes_import_of_an_older_backup(hermes_env, tmp_path)
     undo = _hermes_cli(hermes_env, PLUGIN_KEY, "restore", later[:10], "memory", "--yes")
     assert undo.returncode == 0, undo.stderr
     assert memory.read_text(encoding="utf-8") == "first note\n§\nwritten after the backup"
+
+
+def test_restore_never_overwrites_a_live_agents_memory_write(hermes_env):
+    """A memory write in flight (the memory tool holds its lock and has read the file) when the
+    user applies a restore: the restore waits for it, sees the file changed since its plan, and
+    refuses instead of silently replacing what the agent just stored."""
+    import threading
+    from memory_rewind.restore import RestoreError, apply_restore, plan_restore
+    from memory_rewind.tracking import TrackingOptions
+    from tools.memory_tool import load_on_disk_store
+
+    manager, loaded = _load(hermes_env)
+    manager.invoke_hook("on_session_start", session_id="s1", platform="cli")
+    history = _history(hermes_env)
+    good = history.head()
+    memory = hermes_env / "memories" / "MEMORY.md"
+    memory.write_text("", newline="\n")
+    manager.invoke_hook("pre_llm_call", session_id="s1", platform="cli")
+    plan = plan_restore(history, hermes_env, good, "memories/MEMORY.md", TrackingOptions())
+
+    read_done, finish = threading.Event(), threading.Event()
+
+    def agent_write():
+        def apply(entries, _limit):  # runs under the memory tool's lock, after its re-read
+            read_done.set()
+            finish.wait(5)
+            return entries + ["Agent learned X"], "added"
+        assert load_on_disk_store()._mutate("memory", apply).get("success")
+
+    agent = threading.Thread(target=agent_write)
+    agent.start()
+    assert read_done.wait(5)
+    threading.Timer(0.5, finish.set).start()
+    with pytest.raises(RestoreError, match="changed after the restore plan was made"):
+        apply_restore(history, hermes_env, plan)
+    agent.join()
+    assert memory.read_text() == "Agent learned X", "the agent's write is kept, not replaced"
+
+
+def test_restore_plan_names_the_entries_it_brings_back_and_removes(hermes_env):
+    """Bringing back one deleted memory entry means restoring the whole file, which also removes
+    entries added since. The plan must say so before anything is written."""
+    from tools.memory_tool import load_on_disk_store
+
+    manager, loaded = _load(hermes_env)
+    manager.invoke_hook("on_session_start", session_id="s1", platform="cli")
+    store = load_on_disk_store()
+    assert store.add("memory", "Project Atlas uses Postgres 16").get("success")
+    manager.invoke_hook("pre_llm_call", session_id="s1", platform="cli")
+    before_delete = _history(hermes_env).head()
+    assert store.remove("memory", "Postgres").get("success")  # what the Star Map's delete does
+    assert store.add("memory", "Editor: Helix").get("success")
+    manager.invoke_hook("pre_llm_call", session_id="s1", platform="cli")
+
+    plan = _hermes_cli(hermes_env, PLUGIN_KEY, "restore", before_delete[:10], "memory", "--dry-run")
+    assert plan.returncode == 0, plan.stderr
+    assert "  write   memories/MEMORY.md\n" in plan.stdout
+    assert "          brings back: Project Atlas uses Postgres 16\n" in plan.stdout, plan.stdout
+    assert "          removes:     Editor: Helix\n" in plan.stdout, plan.stdout
+    assert "first note" not in plan.stdout, "entries kept on both sides are not listed"

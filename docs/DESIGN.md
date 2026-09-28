@@ -224,12 +224,23 @@ tool. It:
    `skills/`), rejecting absolute paths, `..`, excluded names and symlinked
    parents, and never writes back a file today's rules exclude, even when an
    older version recorded it;
-2. shows what will change and requires `--yes` (or an interactive "y");
+2. shows what will change (for `MEMORY.md`/`USER.md` also the entries it brings back
+   and the entries it removes, parsed the way Hermes' memory store parses them) and
+   requires `--yes` (or an interactive "y");
 3. snapshots the current state first, so every restore can itself be undone;
-4. writes each file atomically (temp file in the same directory, then
+4. applies only the plan it showed. For a memory file it first takes the lock
+   Hermes' memory tool holds while it re-reads and writes (`<file>.lock`: `flock`
+   on POSIX, a one-byte `msvcrt` lock at offset 0 on Windows; up to 10 s), so it
+   never interleaves with a live agent's memory write (Hermes fixed the same race
+   for its own journey edits, #119668). It then checks every file the plan looked
+   at and refuses if one changed since, so nothing an agent stored while the plan
+   was on screen is replaced unseen. Skills are not locked (`skill_manage` keys its
+   per-skill lock on an internal digest of the name, not a documented contract);
+   the check still covers them;
+5. writes each file atomically (temp file in the same directory, then
    `os.replace`), restores the executable bit, and removes files under the
    target that did not exist at the chosen revision;
-5. snapshots again, recording what was restored.
+6. snapshots again, recording what was restored.
 
 This matches how Hermes' own `hermes backup` import, `/snapshot` restore and
 curator rollback put the user's own bytes back.

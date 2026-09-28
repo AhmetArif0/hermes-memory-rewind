@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
+from contextlib import contextmanager
 
 import pytest
 
+import memory_rewind.restore as restore_mod
 from memory_rewind.restore import (
-    RestoreError, apply_restore, normalize_target, plan_restore,
+    RestoreError, apply_restore, memory_entry_changes, normalize_target, plan_restore,
 )
 
 
@@ -131,3 +135,134 @@ def test_refuses_to_write_through_symlink(home, store, snap, options, tmp_path):
     with pytest.raises(RestoreError):
         apply_restore(store, home, plan)
     assert not any(outside.iterdir()), "nothing may be written outside HERMES_HOME"
+
+
+# ── a restore applies exactly the plan it showed ─────────────────────────────────────────
+
+@contextmanager
+def _hermes_memory_lock(path):
+    """Hold the lock the way Hermes' memory tool does (MemoryStore._file_lock), independently of the
+    plugin's own implementation: <file>.lock, flock on POSIX, a one-byte msvcrt lock on Windows."""
+    raw = os.open(path.with_suffix(path.suffix + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(raw, "r+", encoding="utf-8") as fd:
+        if restore_mod.fcntl is not None:
+            restore_mod.fcntl.flock(fd, restore_mod.fcntl.LOCK_EX)
+        else:
+            fd.seek(0)
+            restore_mod.msvcrt.locking(fd.fileno(), restore_mod.msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if restore_mod.fcntl is not None:
+                restore_mod.fcntl.flock(fd, restore_mod.fcntl.LOCK_UN)
+            else:
+                fd.seek(0)
+                restore_mod.msvcrt.locking(fd.fileno(), restore_mod.msvcrt.LK_UNLCK, 1)
+
+
+def _hold_in_thread(path, seconds):
+    held = threading.Event()
+
+    def run():
+        with _hermes_memory_lock(path):
+            held.set()
+            time.sleep(seconds)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert held.wait(5)
+    return thread
+
+
+def test_memory_file_changed_after_the_plan_is_not_replaced(home, store, snap, options):
+    v1 = snap("v1")
+    memory = home / "memories" / "MEMORY.md"
+    memory.write_text("", newline="\n")
+    snap("emptied")
+    plan = plan_restore(store, home, v1, "memories/MEMORY.md", options)
+    memory.write_text("the agent wrote this while the plan was on screen", newline="\n")
+    with pytest.raises(RestoreError, match="changed after the restore plan was made"):
+        apply_restore(store, home, plan)
+    assert memory.read_text() == "the agent wrote this while the plan was on screen"
+
+
+def test_skill_file_changed_after_the_plan_is_not_replaced(home, store, snap, options):
+    v1 = snap("v1")
+    skill_md = home / "skills" / "productivity" / "notes" / "SKILL.md"
+    skill_md.write_text("---\nname: notes\n---\nEdited.\n", newline="\n")
+    snap("edit")
+    plan = plan_restore(store, home, v1, "skills/productivity/notes", options)
+    skill_md.write_text("---\nname: notes\n---\nEdited again.\n", newline="\n")
+    with pytest.raises(RestoreError):
+        apply_restore(store, home, plan)
+    assert skill_md.read_text().endswith("Edited again.\n")
+
+
+def test_restore_waits_for_the_memory_tools_lock(home, store, snap, options):
+    v1 = snap("v1")
+    memory = home / "memories" / "MEMORY.md"
+    memory.write_text("", newline="\n")
+    snap("emptied")
+    plan = plan_restore(store, home, v1, "memories/MEMORY.md", options)
+    holder = _hold_in_thread(memory, 0.6)
+    started = time.monotonic()
+    apply_restore(store, home, plan)
+    waited = time.monotonic() - started
+    holder.join()
+    assert waited >= 0.4, "the restore wrote while the memory tool held the lock"
+    assert memory.read_text() == "first note\n"
+
+
+def test_restore_gives_up_when_the_lock_stays_held(home, store, snap, options, monkeypatch):
+    monkeypatch.setattr(restore_mod, "LOCK_WAIT_SECONDS", 0.3)
+    v1 = snap("v1")
+    user = home / "memories" / "USER.md"
+    user.write_text("likes coffee\n", newline="\n")
+    snap("changed")
+    plan = plan_restore(store, home, v1, "memories/USER.md", options)
+    holder = _hold_in_thread(user, 1.5)
+    try:
+        with pytest.raises(RestoreError, match="being written by a running Hermes"):
+            apply_restore(store, home, plan)
+    finally:
+        holder.join()
+    assert user.read_text() == "likes coffee\n"
+
+
+def test_only_memory_files_take_the_memory_lock(home, store, snap, options):
+    v1 = snap("v1")
+    (home / "SOUL.md").write_text("changed\n", newline="\n")
+    snap("changed")
+    _restore(store, home, options, v1, "soul")
+    assert not list(home.rglob("*.lock"))
+
+
+@pytest.mark.parametrize("current, restored, back, gone", [
+    (b"a\n\xc2\xa7\nb\n\xc2\xa7\nc", b"a\n\xc2\xa7\nd", ["d"], ["b", "c"]),
+    (b"", b"first note\n", ["first note"], []),
+    (b"a\n\xc2\xa7\nb", None, [], ["a", "b"]),
+    (b"  a  \n\xc2\xa7\n\n\xc2\xa7\nb", b"b\n\xc2\xa7\na", [], []),
+])
+def test_memory_entry_changes(current, restored, back, gone):
+    assert memory_entry_changes(current, restored) == (back, gone)
+
+
+def test_a_filesystem_without_locks_fails_fast(home, store, snap, options, monkeypatch):
+    import errno
+    import types
+
+    def no_locks(_fd, _op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(restore_mod, "fcntl", types.SimpleNamespace(LOCK_EX=2, LOCK_NB=4, LOCK_UN=8, flock=no_locks))
+    monkeypatch.setattr(restore_mod, "msvcrt", None)
+    v1 = snap("v1")
+    memory = home / "memories" / "MEMORY.md"
+    memory.write_text("", newline="\n")
+    snap("emptied")
+    plan = plan_restore(store, home, v1, "memories/MEMORY.md", options)
+    started = time.monotonic()
+    with pytest.raises(RestoreError, match="cannot lock MEMORY.md.lock"):
+        apply_restore(store, home, plan)
+    assert time.monotonic() - started < 1, "a lock error is not a busy lock: no waiting"
+    assert memory.read_text() == ""

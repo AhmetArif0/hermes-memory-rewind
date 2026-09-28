@@ -8,7 +8,8 @@ import time
 
 from .gitstore import GitError, GitStore, GitUnavailable
 from .provenance import parse_body
-from .restore import RestoreError, apply_restore, normalize_target, plan_restore
+from .restore import RestoreError, apply_restore, memory_entry_changes, normalize_target, plan_restore
+from .tracking import MEMORY_FILES
 from .worker import WORKER, take_snapshot
 
 
@@ -153,8 +154,12 @@ def _restore(store: GitStore, home, data_dir, options, args) -> int:
     print(f"Restore {target} to {plan.rev[:10]}:")
     for path in plan.write:
         print(f"  write   {path}")
+        for line in _entry_preview(store, home, plan, path):
+            print(line)
     for path in plan.delete:
         print(f"  remove  {path}")
+        for line in _entry_preview(store, home, plan, path):
+            print(line)
     if args.dry_run:
         return 0
     if not args.yes:
@@ -173,6 +178,35 @@ def _restore(store: GitStore, home, data_dir, options, args) -> int:
     if target.startswith("memories/"):
         print("Memory is loaded when a session starts; use /new (or start a new session) to see it.")
     return 0
+
+
+_PREVIEW_ENTRIES = 10
+_PREVIEW_WIDTH = 72
+
+
+def _entry_preview(store: GitStore, home, plan, path: str) -> list[str]:
+    """For a memory file: the entries the restore brings back and the entries it removes (a
+    whole-file restore also removes entries added after the chosen version)."""
+    if path not in MEMORY_FILES:
+        return []
+    try:
+        current = (home / path).read_bytes()
+    except OSError:
+        current = None
+    restored = store.read_blob(plan.rev, path) if path in plan.write else None
+    back, gone = memory_entry_changes(current, restored)
+    if not back and not gone:
+        return ["          same entries; only their order or spacing changes"]
+    lines = []
+    for label, entries in (("brings back:", back), ("removes:", gone)):
+        for entry in entries[:_PREVIEW_ENTRIES]:
+            text = " ".join(entry.split())
+            if len(text) > _PREVIEW_WIDTH:
+                text = text[:_PREVIEW_WIDTH - 1] + "…"
+            lines.append(f"          {label:<12} {text}")
+        if len(entries) > _PREVIEW_ENTRIES:
+            lines.append(f"          {label:<12} … and {len(entries) - _PREVIEW_ENTRIES} more")
+    return lines
 
 
 def _when(timestamp: int) -> str:

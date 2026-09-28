@@ -1,11 +1,30 @@
-"""Restore tracked files from history back into HERMES_HOME (user-initiated only)."""
+"""Restore tracked files from history back into HERMES_HOME (user-initiated only).
+
+A restore applies exactly the plan it showed. It takes the memory tool's own lock on a
+memory file while it checks and writes it, so it never interleaves with a live agent's
+memory write, and it refuses when a file changed after the plan was made (an agent kept
+working while the user read the plan): nothing written since then is silently replaced.
+"""
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import os
 import tempfile
+import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 from .gitstore import GitStore
 from .tracking import (
@@ -14,6 +33,13 @@ from .tracking import (
 )
 
 ALIASES = {"memory": MEMORY_FILES[0], "user": MEMORY_FILES[1], "soul": SOUL_FILE}
+# Hermes' memory store separates entries with this and drops empty ones (MemoryStore._parse_entries).
+ENTRY_DELIMITER = "\n§\n"
+LOCK_WAIT_SECONDS = 10.0
+_UNREADABLE = "unreadable"
+# "Held by someone else" from a non-blocking flock (POSIX) or msvcrt LK_NBLCK (Windows).
+_LOCK_BUSY = frozenset(filter(None, (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES,
+                                     getattr(errno, "EDEADLK", None), getattr(errno, "EDEADLOCK", None))))
 
 
 class RestoreError(ValueError):
@@ -26,6 +52,8 @@ class RestorePlan:
     target: str
     write: dict[str, str] = field(default_factory=dict)  # path -> git mode
     delete: list[str] = field(default_factory=list)
+    # path -> sha256 of the content the plan was made from (None: the file did not exist)
+    seen: dict[str, str | None] = field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
@@ -69,6 +97,8 @@ def plan_restore(store: GitStore, home: Path, rev: str, target: str,
     plan.delete = sorted(p for p in now if p not in at_rev)
     if at_rev == {} and not plan.delete:
         raise RestoreError(f"nothing under {target} at {rev} and nothing to remove now")
+    plan.seen = {path: _digest(home / path) for path in sorted(set(at_rev) | now)
+                 if is_trackable_path(path, options)}
     return plan
 
 
@@ -76,14 +106,97 @@ def apply_restore(store: GitStore, home: Path, plan: RestorePlan) -> None:
     for path in [*plan.write, *plan.delete]:
         if has_symlinked_component(home, path):
             raise RestoreError(f"refusing to write through a symlink: {path}")
-    for path, mode in plan.write.items():
-        _atomic_write(home / path, store.read_blob(plan.rev, path), executable=(mode == "100755"))
-    for path in plan.delete:
+    with ExitStack() as locks:
+        for path in sorted(p for p in plan.seen if p in MEMORY_FILES):
+            locks.enter_context(_memory_file_lock(home / path))
+        changed = [path for path, digest in plan.seen.items() if _digest(home / path) != digest]
+        if changed:
+            raise RestoreError(f"{changed[0]} changed after the restore plan was made; nothing was "
+                               "restored. Run the command again to see the current plan.")
+        for path, mode in plan.write.items():
+            _atomic_write(home / path, store.read_blob(plan.rev, path), executable=(mode == "100755"))
+        for path in plan.delete:
+            try:
+                (home / path).unlink()
+            except FileNotFoundError:
+                pass
+            _prune_empty_parents(home, path)
+
+
+def memory_entry_changes(current: bytes | None, restored: bytes | None) -> tuple[list[str], list[str]]:
+    """(back, gone): memory entries the restore brings back, and entries it removes."""
+    now, then = _entries(current), _entries(restored)
+    return [e for e in then if e not in now], [e for e in now if e not in then]
+
+
+def _entries(raw: bytes | None) -> list[str]:
+    if not raw:
+        return []
+    text = raw.decode("utf-8", "replace")
+    return list(dict.fromkeys(e for e in (x.strip() for x in text.split(ENTRY_DELIMITER)) if e))
+
+
+def _digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _UNREADABLE
+
+
+@contextmanager
+def _memory_file_lock(path: Path):
+    """The lock Hermes' memory tool holds while it re-reads and writes a memory file
+    (MemoryStore._file_lock): an exclusive lock on ``<file>.lock`` beside it, flock on POSIX
+    and a one-byte lock at offset 0 on Windows. Waits up to LOCK_WAIT_SECONDS."""
+    if fcntl is None and msvcrt is None:
+        yield
+        return
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        raise RestoreError(f"cannot open {lock_path.name}: {exc.strerror or exc}") from exc
+    try:
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while not _try_lock(fd, lock_path.name):
+            if time.monotonic() >= deadline:
+                raise RestoreError(f"{path.name} is being written by a running Hermes; nothing was "
+                                   "restored. Try again in a moment.")
+            time.sleep(0.05)
         try:
-            (home / path).unlink()
-        except FileNotFoundError:
-            pass
-        _prune_empty_parents(home, path)
+            yield
+        finally:
+            _unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _try_lock(fd: int, name: str) -> bool:
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        if exc.errno in _LOCK_BUSY:
+            return False
+        raise RestoreError(f"cannot lock {name}: {exc.strerror or exc}") from exc
+    return True
+
+
+def _unlock(fd: int) -> None:
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        else:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
 
 
 def _under(path: str, target: str) -> bool:
