@@ -176,10 +176,14 @@ Bodies written by 1.0.0 (`session: a, b` on one line) are still read.
 
 ## In-chat history (`/memory-history`)
 
-A plugin slash command (`ctx.register_command`) that shows the history from the surfaces where
-people actually talk to the agent. Hermes dispatches plugin commands from the CLI chat,
-the messaging gateway and the TUI/Desktop RPC (`command.dispatch`). The versions it
-shows:
+A plugin slash command (`ctx.register_command`) dispatched by CLI chat, the messaging
+gateway and TUI/Desktop RPC. This candidate admits only task-bound native platform
+`telegram` plus `chat_type="dm"`; registration does not mean a surface passes the guard.
+It requires the proposed public `get_session_env(..., allow_env_fallback=False)` API;
+an older API produces a refusal with an upgrade/host-command pointer. Other adapter
+surfaces are explicitly unsupported pending audience verification, a restriction of
+the upstream plugin's wider chat convenience. This is not a live adopted release.
+When admitted, it shows:
 
 - `/memory-history`: the last 10 versions.
 - `/memory-history <memory|user|soul|skills/<path>>`: the last 10 versions of one target.
@@ -193,8 +197,11 @@ Decisions:
   - The gateway runs each message under its routed profile's scope and runs sync plugin
     handlers on a pool thread with the context copied.
   - The TUI/Desktop wraps `command.dispatch` in the session's home scope.
-  - So each profile sees only its own history. A test drives this through Hermes' own
-    command lookup, and the TUI RPC was checked by hand on v0.21.5 and `main`.
+  - Profile resolution is separate from audience access. Bound TUI/Desktop calls now
+    set platform/chat_type empty and are refused before history lookup. Earlier TUI
+    manual checks predate this guard; they do not verify the changed access behavior.
+  - The classic CLI slash handler has no session binding; calls are refused.
+    Native host `log`, `show`, `diff` and `restore` remain available.
 - **Read-only.** Viewing never records a version. It waits up to 2 s for a snapshot
   queued at the end of the last turn, so that change is visible. Restore stays a host
   command; the version view prints the exact `hermes memory-rewind restore <version>~1
@@ -206,14 +213,41 @@ Decisions:
     boundary, the budget Hermes' own `/skills diff` uses in chat.
   - A cut reply points at the full `hermes memory-rewind` command. Discord splits
     anything over 2,000 characters itself.
-- **Group chats.**
+- **Audience limits (native b406).**
+  - The gateway binds all session fields around the handler, so explicit group/channel/
+    thread/empty labels are refused even with stale DM fields in process environment.
+  - Telegram private inbound messages construct the plain string `dm`. Slack's event
+    adapter also labels `mpim` (multi-person DM) as `dm`; Matrix uses member-count and
+    direct-room metadata heuristics. Therefore this generic label check alone does not
+    guarantee a one-person audience. The candidate therefore admits only the verified
+    Telegram mapping; sender authorization remains native policy, independently.
+  - Relay input retains the underlying platform label. In b406,
+    `gateway/relay/ws_transport.py::_event_from_wire` takes `chat_type` from the wire
+    (defaulting to `dm`) and stamps `delivered_via_upstream_relay=True` locally.
+    `_set_session_env` binds the platform and chat type, but not that relay flag.
+    This plugin therefore cannot distinguish relayed `telegram`/`dm` from a local
+    Telegram private message. Deployment requires the relay adapter to be disabled,
+    or its Telegram chat-type provenance independently verified. The local Telegram
+    adapter evidence does not cover relay sources; this condition remains NOT VERIFIED.
+  - `get_session_env` falls back to process environment when unbound. TUI/Desktop
+    `command.dispatch` permits a missing session and skips binding then; `/api/ws`
+    exposes this RPC after its native authentication/request gates. It is not solely
+    a host CLI fallback, and it is not proof of a private messaging audience. The
+    opt-in public bound-only read returns the default on that unbound path, so the
+    plugin refuses even with stale environment. The native default is unchanged for
+    other consumers. No private ContextVar access, process latch or new authorization
+    framework is used.
+  - This source-only proposal preserves the accepted Wren Telegram owner-DM history
+    and native host log/show/diff/restore outcome. Wider slash convenience is not
+    advertised as preserved. Owner-only native sender policy and live delivery still
+    require representative acceptance; this guard alone does not establish either.
   - A reply never includes host paths or raw git errors. Unexpected git failures go to
     the Hermes log and the reply says so. Only messages built from the user's own input
     (an unknown version, an untracked target) are shown.
   - Targets are only memory aliases, `SOUL.md`, `memories/…` and `skills/…`; an absolute
     path is read as a version id and rejected.
-  - What a version changed in memory is visible to everyone in the chat. Hermes' own
-    `/memory pending` shows pending memory writes the same way.
+  - When a reply is admitted, memory changes are visible to every recipient of that
+    conversation. Do not equate read-only output with private output.
 
 ## Restore
 
@@ -272,10 +306,17 @@ are out of scope.
   the real `memory` tool and hook dispatch, call `skill_manage` through Hermes'
   own dispatcher and global hook bus (so the provenance comes from the payload
   Hermes really sends), check multiplexed profiles keep separate histories
-  (for recording and for `/memory-history`), and run
-  `hermes memory-rewind log/restore/status` as a subprocess. They run against
-  the minimum supported release (v0.21.5) and `main`.
-- Each safety property is mutation-checked: disabling it makes at least one
-  test fail.
-- `hermes plugins validate` (including the install-time security scan) and
-  `hermes plugins doctor --ci` pass.
+  for recording, and run `hermes memory-rewind log/restore/status` as a subprocess.
+  `/memory-history` profile separation requires the proposed bound-only getter and
+  an explicitly bound Telegram DM context. On versions without that API (including
+  v0.21.5 and inspected b406), the real-handler test instead expects an upgrade/host
+  refusal before history access. It does not stub admission into older Hermes.
+- Candidate evidence: the full plugin suite passed against the proposed native API
+  (plugin `47951870`, native `f1476c0155`: 188 passed, zero skips), including the real
+  plugin manager, memory/hook paths and native CLI under synthetic homes. The native
+  candidate's five focused tests also passed separately. This is not 193 native tests.
+  The integration check's old-API refusal branch was not exercised in that run;
+  missing/old API refusal has focused unit coverage and source review.
+- Prior upstream mutation checks, plugin validation and `doctor --ci` results do not
+  establish acceptance for this unreleased candidate. No live Telegram/relay delivery,
+  owner-only sender policy or installation is verified by the source tests.

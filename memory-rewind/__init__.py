@@ -129,9 +129,10 @@ def register(ctx) -> None:
     from .chat import COMMAND, handle_slash
     from .cli import build_parser, run_cli
 
-    # Read-only view for chat surfaces (Telegram, Discord, Desktop, TUI, CLI chat); restore stays on the host.
+    # Candidate chat view requires task-bound Telegram + DM fields; see chat.py.
+    # Bound Desktop/TUI and ordinary CLI chat are refused; host log/show/diff/restore remain available.
     ctx.register_command(COMMAND, handler=lambda raw_args: handle_slash(raw_args, ctx),
-                         description="Show the version history of memory, skills and SOUL.md (read-only)",
+                         description="Show memory, skills and SOUL.md history in Telegram DMs (read-only; host CLI also available)",
                          args_hint="[memory|user|soul|skills/<path>|<version> [target]]")
     ctx.register_cli_command(
         name=PLUGIN_NAME,

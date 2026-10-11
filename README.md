@@ -56,8 +56,31 @@ names, with `[error]` (or `[blocked]`, `[timeout]`, …) when the call did not s
 
 ### From a chat
 
-`/memory-history` shows the same history from any chat: Telegram, Discord and other
-gateway platforms, the Desktop app, the TUI and the CLI chat. It is read-only.
+This candidate restricts `/memory-history` to Telegram direct messages using
+task-bound native session fields. It requires Hermes' proposed public
+`get_session_env(..., allow_env_fallback=False)` API. On older Hermes, chat history
+refuses with an upgrade/host-command pointer; recording and host commands still work.
+No released version or live installation of that API is claimed here.
+
+This is an explicit restriction of the upstream plugin's wider chat convenience,
+pending review, not an adopted live pin. Other platforms are unsupported until their
+audience mappings are verified: Hermes b406 labels Slack multi-person DMs `dm`, and
+Matrix uses a room heuristic. Native sender policy still controls who can invoke the
+command; the plugin does not identify the owner. Owner-only sender policy must be
+verified separately before claiming owner-only history.
+
+Deployment condition: the relay adapter must be disabled, or the relay's Telegram
+`chat_type` provenance must be verified. Relayed sources carry the underlying platform
+label too; the plugin cannot distinguish them from local Telegram sources through
+these session fields. The verified local adapter mapping does not cover relay input.
+This deployment condition and owner-only delivery are NOT VERIFIED by the source tests.
+
+Bound Desktop/TUI slash calls set these fields empty and are refused. Ordinary CLI
+chat lacks the required binding and is refused too. Use the host commands
+`hermes memory-rewind log`, `show` or `diff` for local history; restore remains a host
+command. Unbound callers, including native sessionless `command.dispatch`, are refused
+even if process environment contains stale Telegram DM fields. This audience guard
+does not replace native sender authorization. See the design notes before integration.
 
 ```text
 /memory-history                          the last 10 versions
@@ -142,8 +165,9 @@ plugins:
 
 History keeps what the files contained. If you ask the agent to forget something,
 the removal is recorded, but older versions still contain it. Versions also note session
-ids, platforms and skill names. A `/memory-history` reply in a group chat is visible to
-everyone in it, including what a version changed in memory. Run
+ids, platforms and skill names. Group/channel/thread labels, non-Telegram platforms
+and unbound callers are refused before history is opened. Telegram DM admission still
+relies on the native sender policy; the plugin itself does not authenticate the owner. Run
 `hermes memory-rewind forget --yes` to delete the history for the active profile.
 
 ## Limits
@@ -170,9 +194,21 @@ PYTHONPATH=/path/to/hermes-agent python -m pytest tests/  # plus end-to-end test
 The end-to-end tests load the plugin through Hermes' real plugin manager, drive the real
 memory tool and hook dispatch, run the `hermes` CLI, and check that separate profiles
 keep separate histories.
+The chat integration check expects refusal on Hermes without the proposed bound-only
+API (including v0.21.5 and inspected b406). With the candidate API, it checks unbound
+refusal and profile separation under an explicitly bound Telegram DM context.
+The full suite passed against the candidate native API (plugin `47951870`, native
+`f1476c0155`: 188 passed, zero skips), including real native CLI calls with synthetic
+homes. That run did not exercise the integration check's old-API refusal branch.
+It does not establish live delivery, sender policy or relay provenance.
 
 ## Changes
 
+- **Unreleased candidate (not activated):** restrict `/memory-history` to task-bound
+  Telegram DM fields, requiring the proposed native bound-only getter. Older APIs,
+  unbound callers and other chat surfaces refuse with a host-command pointer. Native
+  host history/restore and recording remain unchanged. Relay provenance and owner-only
+  sender policy require separate deployment verification; no version bump or release.
 - **1.3.2**: **Fix:** `restore` could replace what a running agent had just written. It
   now applies only the plan it showed: it holds the memory tool's own lock on `MEMORY.md`
   or `USER.md` while it checks and writes, and it refuses when a file changed after the

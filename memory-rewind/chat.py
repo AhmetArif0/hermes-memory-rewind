@@ -1,9 +1,12 @@
-"""`/memory-history`: the history, read-only, from any chat surface (CLI, TUI/Desktop, gateway platforms).
+"""`/memory-history`: read-only history in a task-bound Telegram DM.
 
 Restoring stays a host command (`hermes memory-rewind restore`): a chat message never rewrites
 the agent's knowledge files, and viewing never records a version. Output follows Hermes' own chat
 conventions: plain text, within the 3,000-character budget its `/skills diff` uses in chat. A reply
-may land in a group chat, so it never carries host paths or raw git errors.
+is admitted for task-bound Telegram DM labels. Relay-sourced labels are not
+distinguished; see the README deployment condition. Other adapter DM semantics
+are not equivalent. Native sender policy still controls who may invoke it;
+this is not owner authentication. Host CLI history and restore remain independent.
 """
 
 from __future__ import annotations
@@ -36,8 +39,30 @@ Restoring is a host command: hermes memory-rewind restore <version> <target>"""
 
 def handle_slash(raw_args: str, ctx) -> str:
     """Slash-command entry point; HERMES_HOME resolves in the caller's (profile-scoped) context."""
+    # Require task-bound fields, never inherited process environment. Older native
+    # APIs cannot establish this contract and get a host-command/upgrade pointer.
+    try:
+        from gateway.session_context import get_session_env
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "", allow_env_fallback=False)
+        chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "", allow_env_fallback=False)
+    except (ImportError, TypeError):
+        return _CONTEXT_API_NOTICE
+    if platform != "telegram" or chat_type != "dm":
+        return _PRIVATE_HISTORY_NOTICE
     from . import read_options, resolve_data_dir, resolve_home
     return render_history(raw_args, resolve_home(), resolve_data_dir(), read_options(ctx))
+
+
+_PRIVATE_HISTORY_NOTICE = (
+    "Chat memory history is available only in a Telegram direct message. "
+    "For local access, use hermes memory-rewind log, show or diff."
+)
+
+_CONTEXT_API_NOTICE = (
+    "Chat memory history requires Hermes support for task-bound session reads "
+    "(get_session_env allow_env_fallback=False). Upgrade to a version with that API; "
+    "meanwhile use hermes memory-rewind log, show or diff on the host."
+)
 
 
 def render_history(raw_args: str, home: Path, data_dir: Path, options: TrackingOptions) -> str:

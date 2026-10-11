@@ -330,14 +330,18 @@ def test_multiplexed_profiles_keep_separate_histories(hermes_env, tmp_path):
 
 
 def test_memory_history_chat_command_follows_the_profile(hermes_env, tmp_path):
-    """`/memory-history` through Hermes' own command lookup (the one CLI, gateway and TUI use). The
-    gateway runs sync handlers on a pool thread with the caller's context copied, which is how a
-    multiplexed profile reaches the handler: each profile must see only its own history."""
+    """Real command lookup refuses unbound/old APIs; bound Telegram calls follow the profile.
+
+    The gateway copies the caller's context into its worker. Bind through the real public API,
+    only when it supports bound-only reads; a stub must not turn an old API into an admission.
+    """
     import contextvars
     from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import patch
 
     from hermes_cli import plugins as hermes_plugins_mod
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from memory_rewind.chat import _CONTEXT_API_NOTICE, _PRIVATE_HISTORY_NOTICE
 
     _install(hermes_env)
     hermes_plugins_mod._reset_plugin_managers_for_tests()
@@ -364,16 +368,37 @@ def test_memory_history_chat_command_follows_the_profile(hermes_env, tmp_path):
             reset_hermes_home_override(token)
         assert worker.flush(timeout=30)
 
+        try:
+            from gateway.session_context import get_session_env, set_session_vars
+            contextvars.Context().run(get_session_env, "HERMES_SESSION_PLATFORM", "",
+                                      allow_env_fallback=False)
+        except (ImportError, TypeError):
+            with patch.object(manager._plugins[PLUGIN_KEY].module, "resolve_home",
+                              side_effect=AssertionError("refused call read history")):
+                assert work_context.run(handler, "") == _CONTEXT_API_NOTICE
+                assert contextvars.Context().run(handler, "help") == _CONTEXT_API_NOTICE
+            assert _history(work).commit_count() == 2
+            assert _history(hermes_env).commit_count() == 2
+            return
+
+        with patch.object(manager._plugins[PLUGIN_KEY].module, "resolve_home",
+                          side_effect=AssertionError("unbound call read history")):
+            assert contextvars.Context().run(handler, "") == _PRIVATE_HISTORY_NOTICE
+        home_context = contextvars.copy_context()
+        for caller_context in (work_context, home_context):
+            caller_context.run(set_session_vars, platform="telegram", chat_type="dm")
+
         with ThreadPoolExecutor(max_workers=1) as pool:
             work_view = pool.submit(work_context.run, handler, "").result()
-            home_view = pool.submit(contextvars.copy_context().run, handler, "").result()
+            home_view = pool.submit(home_context.run, handler, "").result()
             work_rev = _history(work).head()
             version_view = pool.submit(work_context.run, handler, work_rev[:10]).result()
 
         assert "from  telegram, session work-1" in work_view and "home-1" not in work_view
         assert "from  cli, session home-1" in home_view and "work-1" not in home_view
         assert "+work edit" in version_view
-        assert hermes_plugins_mod.resolve_plugin_command_result(handler("help")).startswith("/memory-history")
+        assert hermes_plugins_mod.resolve_plugin_command_result(
+            home_context.run(handler, "help")).startswith("/memory-history")
         assert _history(work).commit_count() == 2 and _history(hermes_env).commit_count() == 2, \
             "viewing must not record a version"
     finally:
